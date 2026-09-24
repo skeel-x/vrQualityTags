@@ -123,7 +123,12 @@ _FLAT3D_PAIR = re.compile(r"(?<![a-z0-9])(?:half|full)[\s_.-]?(sbs|ou|tb)(?![a-z
 _FLAT3D_LOOSE = {"sbs": SBS, "ou": TB}
 _VR_WORDS = {"vr", "vr180", "vr360", "180", "360", "180x180", "fisheye", "3dh", "3dv"}
 _WORD_LENS = {"fisheye190": RF52, "rf52": RF52, "fisheye200": MKX200, "mkx200": MKX200,
-              "mkx220": MKX220, "vrca220": VRCA220}
+              "mkx220": MKX220, "vrca220": VRCA220, "fisheye220": MKX220}
+# lens names written with a separator before the number: "MKX-220", "mkx 200",
+# "Fisheye_190", "RF 52"
+_LENS_SPLIT = re.compile(r"(?<![a-z0-9])(mkx|vrca|fisheye|rf)[\s_.-]+(\d{2,3})(?!\d)")
+# DeoVR's naming convention: 3dh = side by side, 3dv = over-under
+_WORD_STEREO = {"3dh": SBS, "3dv": TB}
 
 
 def _one(values):
@@ -162,7 +167,14 @@ def parse_filename(path):
     if _180X180.search(base):
         screen.add(DOME)
 
-    lens = _one({_WORD_LENS[w] for w in words if w in _WORD_LENS})
+    for w, value in _WORD_STEREO.items():
+        if w in words:
+            stereo.add(value)
+    if "fisheye" in words or "fisheye180" in words:
+        screen.add(FISHEYE)
+    lens_words = {w for w in words if w in _WORD_LENS}
+    lens_words |= {a + b for a, b in _LENS_SPLIT.findall(base) if a + b in _WORD_LENS}
+    lens = _one({_WORD_LENS[w] for w in lens_words})
     alpha_candidate = "alpha" in words or bool(_AR_PHRASE.search(base))
 
     strong = {_FLAT3D_STRONG[w] for w in words if w in _FLAT3D_STRONG}

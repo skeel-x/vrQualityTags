@@ -145,3 +145,29 @@ class Flat3DMarkers(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLensAndStereoSpellings(unittest.TestCase):
+    def check(self, name, screen=None, lens=None, stereo=None):
+        f = v.parse_filename("/lib/" + name)
+        self.assertEqual((f["screen"], f["lens"], f["stereo"]), (screen, lens, stereo), name)
+
+    def test_plain_fisheye_word(self):
+        self.check("Title FISHEYE.mp4", screen=v.FISHEYE)
+        self.check("Title_fisheye_LR.mp4", screen=v.FISHEYE, stereo=v.SBS)
+
+    def test_fisheye_with_fov(self):
+        self.check("Title_FISHEYE220.mp4", lens=v.MKX220)
+        self.check("Title_Fisheye_190.mp4", screen=v.FISHEYE, lens=v.RF52)
+
+    def test_lens_with_separator(self):
+        self.check("Title_MKX-220.mp4", lens=v.MKX220)
+        self.check("Title mkx 200.mp4", lens=v.MKX200)
+        self.check("Title VRCA-220.mp4", lens=v.VRCA220)
+
+    def test_deovr_3dh_3dv(self):
+        self.check("Title_180_3dh.mp4", screen=v.DOME, stereo=v.SBS)
+        self.check("Title_360_3dv.mp4", screen=v.SPHERE, stereo=v.TB)
+
+    def test_contradicting_screen_words_leave_it_to_pixels(self):
+        self.check("Title_fisheye_180.mp4", screen=None)

@@ -80,9 +80,12 @@ In order of authority:
    * VR layout, as a whole underscore-delimited segment so that title words do
      not count: `_LR_` `_SBS_` -> `SBS`, `_TB_` `_OU_` -> `TB`,
      `_RL_` -> `RL` + `SBS`, `_MONO_` `_2D_` -> mono, `_180` or `180x180` ->
-     `DOME`, `_360` -> `SPHERE`.
+     `DOME`, `_360` -> `SPHERE`. DeoVR's `3dh` / `3dv` words -> `SBS` / `TB`.
    * Lens, as any word: `FISHEYE190` `RF52` -> `RF52`, `FISHEYE200` `MKX200` ->
-     `MKX200`, `MKX220`, `VRCA220` (each implies `FISHEYE`).
+     `MKX200`, `FISHEYE220` `MKX220` -> `MKX220`, `VRCA220` (each implies
+     `FISHEYE`). A separator before the number also works: `MKX-220`,
+     `mkx 200`, `Fisheye_190`, `VRCA-220`.
+   * `FISHEYE` on its own -> `FISHEYE` (lens left to the watermark).
    * Flat 3D: `HSBS`, `FSBS`, `LRF`, `Half-SBS`, `Full_SBS`, `HOU`, `Half-OU`,
      `TAB`, `TBF`, `Full-TB` -> `FLAT` + `SBS`/`TB`, anywhere. Outside the path
      filter the looser `3D`, `SBS` and `OU` count as well (`3D` alone means
@@ -95,7 +98,7 @@ In order of authority:
    readable it is the only authority. Up to eight frames are read with
    tesseract and two must agree. Only done for a fisheye whose lens the
    filename left open.
-3. **Frame measurement.** Two frames (40% and 60% into the file) are decoded to
+3. **Frame measurement.** Two frames (40% and 60% into the file, nearest keyframe) are decoded to
    a 256 px thumbnail:
    * *stereo*: correlation between the two halves (side by side, then top and
      bottom). A layout only counts if it leaves a plausible eye shape.

@@ -30,9 +30,11 @@ WHERE THE ANSWER COMES FROM, IN ORDER OF AUTHORITY
 The quality tier is measured from the file itself: width decides it, and in
 the 6K band the bitrate has to agree too, because that is where upscales hide.
 
-Outside the VR path nothing is decoded: flat (non-VR) stereoscopic 3D files are
-recognised from their names alone (3D, SBS, Half-SBS, LRF, HOU, ...) and get
-FLAT + SBS or FLAT + TB. Every other file there is left untouched.
+Outside the VR path a file is measured only when Stash's metadata alone says it
+is VR (a 2:1 or square frame at least 3840 wide, or a VR marker in its name).
+Flat (non-VR) stereoscopic 3D files there are recognised from their names alone
+(3D, SBS, Half-SBS, LRF, HOU, ...) and get FLAT + SBS or FLAT + TB. Every other
+file there is left untouched.
 
 Pure standard library on purpose: the plugin interpreter has no numpy or PIL,
 and arithmetic over a 256px thumbnail does not need them.
@@ -62,6 +64,8 @@ DEFAULTS = {
     "minWidth": 1920,
     "ffmpegPath": "/usr/bin/ffmpeg",
     "tesseractPath": "/usr/bin/tesseract",
+    # VR-shaped files outside the VR path, decided from metadata only
+    "measureVrShapedOutside": True,
     # flat 3D outside the VR path, from filenames only
     "flat3dFilenameScan": True,
     # optional Stash API key; the session Stash hands a task expires after an
@@ -70,7 +74,7 @@ DEFAULTS = {
 }
 
 NUMERIC = ("min8kWidth", "min7kWidth", "min6kWidth", "min6kBitrateMbit", "minWidth")
-BOOLEAN = ("readFovWatermark", "overwrite", "flat3dFilenameScan")
+BOOLEAN = ("readFovWatermark", "overwrite", "measureVrShapedOutside", "flat3dFilenameScan")
 
 # ---------------------------------------------------------------- vocabulary
 # Mirrors stash-vr's default video rules (internal/config/settings.go).
@@ -125,6 +129,9 @@ _FLAT3D_STRONG = {"hsbs": SBS, "fsbs": SBS, "lrf": SBS, "hou": TB, "tab": TB, "t
 _FLAT3D_PAIR = re.compile(r"(?<![a-z0-9])(?:half|full)[\s_.-]?(sbs|ou|tb)(?![a-z0-9])")
 _FLAT3D_LOOSE = {"sbs": SBS, "ou": TB}
 _VR_WORDS = {"vr", "vr180", "vr360", "180", "360", "180x180", "fisheye", "3dh", "3dv"}
+# words that make a file outside the VR path worth measuring; a bare "180" or
+# "360" is too common in titles, the _180 / _360 segments count via "screen"
+_VR_NAME_WORDS = {"vr", "vr180", "vr360", "180x180", "fisheye", "fisheye180", "3dh", "3dv"}
 _WORD_LENS = {"fisheye190": RF52, "rf52": RF52, "fisheye200": MKX200, "mkx200": MKX200,
               "mkx220": MKX220, "vrca220": VRCA220, "fisheye220": MKX220}
 # lens names written with a separator before the number: "MKX-220", "mkx 200",
@@ -198,6 +205,7 @@ def parse_filename(path):
         "alpha_candidate": alpha_candidate,
         "flat3d": flat3d,
         "flat3d_loose": _one(loose),
+        "vr_word": bool(words & _VR_NAME_WORDS),
     }
     if flat3d:
         # a flat 3D marker settles both questions, whatever else the name says
@@ -702,6 +710,27 @@ def path_matches(cfg, path):
     return not cfg["pathFilter"] or cfg["pathFilter"] in (path or "")
 
 
+VR_SHAPE_MIN_WIDTH = 3840
+VR_SHAPE_TOLERANCE = 0.05
+
+
+def looks_vr(scene):
+    """Whether a scene outside the path filter is VR, from Stash's metadata of
+    its primary file alone (nothing is decoded): a 2:1 or square frame at least
+    3840 wide, or a VR marker in the file name. A flat 3D name never counts."""
+    f = (scene.get("files") or [{}])[0]
+    fn = parse_filename(f.get("path"))
+    if fn["flat3d"]:
+        return False
+    if fn["screen"] or fn["lens"] or fn["vr_word"]:
+        return True
+    w, h = f.get("width") or 0, f.get("height") or 0
+    if w < VR_SHAPE_MIN_WIDTH or not h:
+        return False
+    a = w / h
+    return abs(a - 2.0) <= VR_SHAPE_TOLERANCE or abs(a - 1.0) <= VR_SHAPE_TOLERANCE
+
+
 def load_config(stored):
     cfg = dict(DEFAULTS)
     for k, v in (stored or {}).items():
@@ -757,6 +786,15 @@ SCENE_PAGE_REGEX = SCENE_PAGE.replace("modifier:INCLUDES", "modifier:MATCHES_REG
 FLAT3D_PATH_REGEX = (r"(?i)(^|[^a-z0-9])(3d|sbs|hsbs|fsbs|lrf|ou|hou|tab|tbf|"
                      r"(half|full)(sbs|ou|tb))([^a-z0-9]|$)")
 FLAT3D_SCOPE = (FLAT, SBS, TB, MONO, RL)
+# candidates for the VR-shaped check outside the path filter; looks_vr() has the
+# last word. MIN(width, height) > 1439 (Stash's FULL_HD GREATER_THAN) holds for
+# every 2:1 or square frame at least 3840 wide.
+SCENE_PAGE_BIG = """query($p:Int!,$f:String!){findScenes(
+  scene_filter:{resolution:{value:FULL_HD,modifier:GREATER_THAN},
+                path:{value:$f,modifier:EXCLUDES}},
+  filter:{per_page:100,page:$p,sort:"id",direction:ASC}){
+  count scenes{%s}}}""" % SCENE_FIELDS
+VR_NAME_PATH_REGEX = r"(?i)(^|[^a-z0-9])(vr|180|360|fisheye|3dh|3dv|mkx|vrca|rf)"
 SCENE_UPDATE = "mutation($i:SceneUpdateInput!){sceneUpdate(input:$i){id}}"
 
 
@@ -895,29 +933,71 @@ def _pages(stash, query, value):
         page += 1
 
 
-def run_all(stash, cfg, ids, mode):
-    passes = [("VR", SCENE_PAGE, cfg["pathFilter"], process_scene)]
+def candidates(stash, cfg):
+    """Every scene a task run visits as (scene, handler, kind), in ascending id
+    order. Each scene is visited once: the path filter wins, then the VR-shaped
+    check, then the flat 3D name check."""
+    chosen = {}
+
+    def add(sc, handler, kind):
+        if sc["id"] not in chosen:
+            chosen[sc["id"]] = (sc, handler, kind)
+
+    for sc, _ in _pages(stash, SCENE_PAGE, cfg["pathFilter"]):
+        add(sc, process_scene, "VR")
+
+    def outside(query, value):
+        for sc, _ in _pages(stash, query, value):
+            if sc["id"] not in chosen and not path_matches(
+                    cfg, (sc.get("files") or [{}])[0].get("path")):
+                yield sc
+
+    if cfg["measureVrShapedOutside"]:
+        for query, value in ((SCENE_PAGE_BIG, cfg["pathFilter"]),
+                             (SCENE_PAGE_REGEX, VR_NAME_PATH_REGEX)):
+            for sc in outside(query, value):
+                if looks_vr(sc):
+                    add(sc, process_scene, "VR-shaped")
     if cfg["flat3dFilenameScan"]:
-        passes.append(("flat 3D", SCENE_PAGE_REGEX, FLAT3D_PATH_REGEX, process_flat_scene))
-    for i, (label, query, value, handler) in enumerate(passes):
-        seen = changed = 0
-        for sc, done in _pages(stash, query, value):
-            path = ((sc.get("files") or [{}])[0].get("path"))
-            if handler is process_flat_scene and path_matches(cfg, path):
-                continue                  # already handled by the VR pass
-            seen += 1
-            try:
-                r = handler(stash, cfg, sc, ids, mode)
-            except Exception as e:
-                log("e", f"scene {sc['id']}: {type(e).__name__}: {e}")
-                continue
-            if r:
-                changed += 1
-                log("i", f"scene {sc['id']}: {r}")
-            if seen % 20 == 0 or done >= 1.0:
-                # Stash parses the progress line as a float between 0 and 1
-                log("p", f"{(i + done) / len(passes):.4f}")
-        log("i", f"done ({mode}, {label}): {seen} scenes examined, {changed} changed")
+        for sc in outside(SCENE_PAGE_REGEX, FLAT3D_PATH_REGEX):
+            add(sc, process_flat_scene, "flat 3D")
+    return sorted(chosen.values(), key=lambda c: int(c[0]["id"]))
+
+
+def run_all(stash, cfg, ids, mode):
+    todo = candidates(stash, cfg)
+    kinds = {}
+    for _, _, kind in todo:
+        kinds[kind] = kinds.get(kind, 0) + 1
+    log("i", f"{mode}: {len(todo)} scenes to examine ("
+             + ", ".join(f"{n} {k}" for k, n in sorted(kinds.items())) + ")")
+    changed = 0
+    for n, (sc, handler, _) in enumerate(todo, 1):
+        try:
+            r = handler(stash, cfg, sc, ids, mode)
+        except Exception as e:
+            log("e", f"scene {sc['id']}: {type(e).__name__}: {e}")
+            r = None
+        if r:
+            changed += 1
+            log("i", f"scene {sc['id']}: {r}")
+        if n % 20 == 0 or n == len(todo):
+            # Stash parses the progress line as a float between 0 and 1
+            log("p", f"{n / len(todo):.4f}")
+    log("i", f"done ({mode}): {len(todo)} scenes examined, {changed} changed")
+
+
+def route(cfg, scene):
+    """The handler for one scene in the hook, or None to leave it alone."""
+    if not scene:
+        return None
+    if path_matches(cfg, (scene.get("files") or [{}])[0].get("path")):
+        return process_scene
+    if cfg["measureVrShapedOutside"] and looks_vr(scene):
+        return process_scene
+    if cfg["flat3dFilenameScan"]:
+        return process_flat_scene
+    return None
 
 
 def main():
@@ -946,11 +1026,8 @@ def main():
             print(json.dumps({"output": "ok"}))
             return
         scene = stash.call(SCENE_ONE, {"id": str(sid)})["findScene"]
-        r = None
-        if scene and path_matches(cfg, ((scene.get("files") or [{}])[0].get("path"))):
-            r = process_scene(stash, cfg, scene, ids, "untagged")
-        elif scene and cfg["flat3dFilenameScan"]:
-            r = process_flat_scene(stash, cfg, scene, ids, "untagged")
+        handler = route(cfg, scene)
+        r = handler(stash, cfg, scene, ids, "untagged") if handler else None
         if r:
             log("i", f"scene {sid}: {r}")
 

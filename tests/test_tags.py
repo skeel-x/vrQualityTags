@@ -103,6 +103,7 @@ class Diffing(unittest.TestCase):
         self.assertEqual(c["tag8k"], "8K")
         self.assertIs(c["overwrite"], True)
         self.assertIs(c["readFovWatermark"], True)
+        self.assertIs(c["measureVrShapedOutside"], True)
         self.assertEqual(v.load_config(None)["minWidth"], 1920.0)
 
 
@@ -209,11 +210,20 @@ class Library:
         if "findScenes" in query:
             f = variables["f"]
             if "MATCHES_REGEX" in query:
+                kind = "regex"
                 rx = _re.compile(f)
                 hits = [s for s in self.scenes.values() if rx.search(s["files"][0]["path"])]
+            elif "resolution" in query:
+                # Stash: FULL_HD GREATER_THAN is MIN(width, height) > 1439
+                kind = "resolution"
+                hits = [s for s in self.scenes.values()
+                        if min(s["files"][0]["width"], s["files"][0]["height"]) > 1439
+                        and f not in s["files"][0]["path"]]
             else:
+                kind = "path"
                 hits = [s for s in self.scenes.values() if f in s["files"][0]["path"]]
-            self.queries.append(("regex" if "MATCHES_REGEX" in query else "path", f))
+            hits.sort(key=lambda s: int(s["id"]))
+            self.queries.append((kind, f))
             page = variables["p"]
             return {"findScenes": {"count": len(hits), "scenes": hits[(page - 1) * 100:page * 100]}}
         if "findScene(" in query:
@@ -253,13 +263,80 @@ class Passes(unittest.TestCase):
         self.assertEqual(self.tags(lib, "3"), set())
         # a VR-path file is handled by the VR pass only, never by the filename scan
         self.assertEqual(self.tags(lib, "4"), {"DOME", "SBS"})
-        self.assertEqual([q[0] for q in lib.queries], ["path", "regex"])
+        self.assertEqual([q[0] for q in lib.queries],
+                         ["path", "resolution", "regex", "regex"])
 
     def test_flat_scan_can_be_turned_off(self):
         lib = self.library()
-        self.run_all(lib, flat3dFilenameScan=False)
+        self.run_all(lib, flat3dFilenameScan=False, measureVrShapedOutside=False)
         self.assertEqual(self.tags(lib, "2"), set())
         self.assertEqual([q[0] for q in lib.queries], ["path"])
+
+    def vr_outside_library(self):
+        return Library([
+            scene(8192, sid="1", path="/media/VR/Studio/a.mp4"),
+            # 2:1 and square frames at least 3840 wide
+            scene(files=[{"width": 5760, "height": 2880, "duration": 600, "bit_rate": 5e7,
+                          "size": 1, "path": "/mnt/adult/Interactive/AHE VR/x.mp4"}], sid="5"),
+            scene(files=[{"width": 4096, "height": 4096, "duration": 600, "bit_rate": 5e7,
+                          "size": 1, "path": "/mnt/adult/Other/y.mp4"}], sid="6"),
+            # VR marker in the name, frame too small for the shape rule
+            scene(files=[{"width": 3840, "height": 1080, "duration": 600, "bit_rate": 5e7,
+                          "size": 1, "path": "/mnt/adult/SLR_Studio_Title_LR_180.mp4"}],
+                  sid="7"),
+            # ordinary 4K and a 4K flat 3D film: not VR
+            scene(files=[{"width": 3840, "height": 2160, "duration": 600, "bit_rate": 5e7,
+                          "size": 1, "path": "/media/Movies/Film.mkv"}], sid="8"),
+            scene(files=[{"width": 3840, "height": 1920, "duration": 600, "bit_rate": 5e7,
+                          "size": 1, "path": "/media/Movies/Film HSBS.mkv"}], sid="9"),
+            # 2:1 but below 3840
+            scene(files=[{"width": 2880, "height": 1440, "duration": 600, "bit_rate": 5e7,
+                          "size": 1, "path": "/media/Clips/z.mp4"}], sid="10"),
+        ])
+
+    def test_vr_shaped_outside_the_filter_is_measured(self):
+        lib = self.vr_outside_library()
+        with mock.patch.object(v, "measure_projection",
+                               return_value=({v.DOME, v.SBS}, "why")) as m, \
+                mock.patch.object(v, "log"):
+            v.run_all(lib, cfg(), IDS, "untagged")
+        measured = sorted(int(c.args[1]["id"]) for c in m.call_args_list)
+        self.assertEqual(measured, [1, 5, 6, 7])
+        self.assertEqual(self.tags(lib, "5"), {"DOME", "SBS", "6K HBR", "HQ"})
+        self.assertEqual(self.tags(lib, "8"), set())
+        self.assertEqual(self.tags(lib, "9"), {"FLAT", "SBS"})
+        self.assertEqual(self.tags(lib, "10"), set())
+
+    def test_vr_shaped_outside_can_be_turned_off(self):
+        lib = self.vr_outside_library()
+        with mock.patch.object(v, "measure_projection",
+                               return_value=({v.DOME, v.SBS}, "why")) as m, \
+                mock.patch.object(v, "log"):
+            v.run_all(lib, cfg(measureVrShapedOutside=False), IDS, "untagged")
+        self.assertEqual([c.args[1]["id"] for c in m.call_args_list], ["1"])
+        self.assertEqual(self.tags(lib, "5"), set())
+
+    def test_candidates_are_unique_and_in_id_order(self):
+        lib = self.vr_outside_library()
+        with mock.patch.object(v, "log"):
+            todo = v.candidates(lib, cfg())
+        ids = [int(sc["id"]) for sc, _, _ in todo]
+        self.assertEqual(ids, [1, 5, 6, 7, 9])
+        self.assertEqual([k for _, _, k in todo],
+                         ["VR", "VR-shaped", "VR-shaped", "VR-shaped", "flat 3D"])
+
+    def test_hook_measures_vr_shaped_outside(self):
+        c = cfg()
+        lib = self.vr_outside_library()
+        self.assertIs(v.route(c, lib.scenes["5"]), v.process_scene)
+        self.assertIs(v.route(c, lib.scenes["7"]), v.process_scene)
+        self.assertIs(v.route(c, lib.scenes["8"]), v.process_flat_scene)
+        self.assertIs(v.route(cfg(measureVrShapedOutside=False), lib.scenes["5"]),
+                      v.process_flat_scene)
+        self.assertIsNone(v.route(cfg(measureVrShapedOutside=False,
+                                      flat3dFilenameScan=False), lib.scenes["5"]))
+        self.assertIsNone(v.route(c, None))
+
 
     def test_clear(self):
         lib = self.library()
@@ -291,6 +368,35 @@ class Passes(unittest.TestCase):
         self.assertEqual(self.tags(lib, "2"), {"FLAT", "SBS"})
         self.assertEqual(self.tags(lib, "3"), set())
         self.assertEqual(self.tags(lib, "4"), set())
+
+
+class LooksVr(unittest.TestCase):
+    def shaped(self, w, h, path="/media/Other/x.mp4"):
+        return v.looks_vr(scene(files=[{"width": w, "height": h, "path": path}]))
+
+    def test_frame_shape(self):
+        self.assertTrue(self.shaped(3840, 1920))
+        self.assertTrue(self.shaped(8192, 4096))
+        self.assertTrue(self.shaped(5760, 2880))
+        self.assertTrue(self.shaped(3840, 3840))
+        self.assertTrue(self.shaped(3840, 1900))       # 2.02, within 0.05
+        self.assertFalse(self.shaped(3840, 1800))      # 2.13
+        self.assertFalse(self.shaped(3840, 2160))      # 16:9
+        self.assertFalse(self.shaped(2880, 1440))      # too narrow
+        self.assertFalse(self.shaped(3840, 0))
+
+    def test_name_markers(self):
+        for name in ("SLR_Studio_Title_LR_180.mp4", "Title 3dh.mp4", "Title [VR].mp4",
+                     "Title FISHEYE.mp4", "Title_MKX200.mp4", "Title_360_x.mp4",
+                     "Title VR180.mp4"):
+            with self.subTest(name=name):
+                self.assertTrue(self.shaped(1920, 1080, "/media/Other/" + name))
+        for name in ("Film.mkv", "Top 180 Moments.mp4", "Film 3D HSBS VR.mkv", "Every.mp4"):
+            with self.subTest(name=name):
+                self.assertFalse(self.shaped(1920, 1080, "/media/Other/" + name))
+
+    def test_no_file(self):
+        self.assertFalse(v.looks_vr(scene(files=[])))
 
 
 class MeasureProjection(unittest.TestCase):

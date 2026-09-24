@@ -11,7 +11,8 @@ class FilenameMarkers(unittest.TestCase):
     def test_no_markers(self):
         self.assertEqual(fn("Studio - 2024-07-23 - Some Title [VR].mp4"), {
             "stereo": None, "rl": False, "screen": None, "lens": None,
-            "alpha_candidate": False, "flat3d": None, "flat3d_loose": None})
+            "alpha_candidate": False, "flat3d": None, "flat3d_loose": None,
+            "vr_word": True})
 
     def test_stereo_markers(self):
         for marker, want in (("LR", v.SBS), ("SBS", v.SBS), ("TB", v.TB), ("OU", v.TB),

@@ -63,7 +63,8 @@ effect in the headset. Tags outside this table are never added or removed.
 
 `FLAT` means an ordinary 2D video; `MONO` is only used for mono VR. A scene
 without any projection tag also plays flat in stash-vr, which is why files
-outside the path filter are left alone unless their name marks them as 3D.
+outside the path filter are left alone unless they look like VR or their name
+marks them as 3D (see [Outside the path filter](#outside-the-path-filter)).
 
 `MONO`, `RL`, `MKX220` and `VRCA220` need the matching rules in stash-vr (they
 are part of its default rules; an older configuration gets them with Setup's
@@ -114,8 +115,25 @@ In order of authority:
    * *packed-alpha guard*: a near-binary lower half is a matte, not a second
      eye; such a file gets `VRP: Unresolved` instead of a wrong `TB`.
 
-Outside the path filter nothing is decoded; only the flat 3D filename check
-runs there (setting `flat3dFilenameScan`).
+## Outside the path filter
+
+VR files do not always live under the path filter. A scene outside it is
+measured like any VR scene when its primary file looks like VR from Stash's
+metadata alone (setting `measureVrShapedOutside`, on by default):
+
+* the frame is at least 3840 wide and its aspect (width / height) is within
+  0.05 of 2.0 (a side-by-side 180 or a 360 file) or of 1.0 (a top-bottom 180
+  file), or
+* the file name carries a VR marker: a screen or lens marker from the list
+  above (`_180`, `_360`, `FISHEYE`, `MKX200`, `RF52`, ...) or a VR word (`VR`,
+  `VR180`, `VR360`, `180x180`, `3dh`, `3dv`).
+
+A name with a flat 3D marker (`HSBS`, `Half-OU`, ...) never counts. Deciding
+this needs no decoding: task runs ask Stash for scenes with a large frame or a
+matching path and check each one's metadata.
+
+Every other file outside the path filter is only checked for a flat 3D name
+(setting `flat3dFilenameScan`); nothing there is decoded.
 
 ## Passthrough: the corner-packed alpha matte
 
@@ -166,7 +184,8 @@ whose clips mix formats is left without `Alpha` because both frames must agree.
 * **Tag untagged VR scenes**: measures every scene under the path filter that
   has no projection tag yet (`DOME SPHERE FISHEYE FLAT RF52 MKX200 MKX220
   VRCA220 CUBEMAP EAC VRP: Unresolved`), refreshes the quality tag of every
-  scene there, and runs the flat 3D filename check elsewhere.
+  scene there, measures VR-shaped files outside the path filter, and runs the
+  flat 3D filename check elsewhere.
 * **Re-measure and retag all VR scenes**: measures everything under the path
   filter again and replaces every tag the plugin manages.
 * **Remove all managed tags**: detaches the managed tags; the tags themselves
@@ -186,6 +205,7 @@ Writes are idempotent: a scene whose tags are already right is not written to.
 | Read SLR FOV watermark | on | OCR the watermark to pick `RF52`/`MKX200`/`MKX220` |
 | Re-measure already-tagged scenes | off | measure scenes that already have a projection tag on every run and hook |
 | Minimum width (px) | 1920 | narrower files are not measured |
+| Measure VR-shaped files outside the path filter | on | measure a scene outside the path filter when its file is a 2:1 or square frame at least 3840 wide or has a VR marker in its name |
 | Tag flat 3D files outside the path filter | on | the flat 3D filename check |
 | ffmpeg path, tesseract path | `/usr/bin/...` | |
 | Parent tag, 8K/7K/6K tag names | `HQ`, `8K`, `7K`, `6K HBR` | quality tag names |
@@ -194,7 +214,8 @@ Writes are idempotent: a scene whose tags are already right is not written to.
 | Stash API key (for long tasks) | empty | Stash ends a plugin task's session after an hour, so a full retag of a large library stops part way with `401 Unauthorized`. Paste your API key (*Settings -> Security*) and the plugin authenticates with it instead. |
 
 Stash shows an untouched on/off setting as off; the plugin treats an untouched
-setting as its default (on for the watermark and the flat 3D check). Switch it
+setting as its default (on for the watermark, the VR-shaped check and the flat
+3D check). Switch it
 on and off once to store an explicit value.
 
 ## Quality tiers

@@ -1,6 +1,6 @@
 name: VR Quality Tags
 description: Companion to stash-vr. Measures each VR file and tags its projection, fisheye lens, stereo layout, eye order and passthrough alpha matte, plus a measured quality tier. Flat 3D files are recognised by name.
-version: 2.0.0
+version: 2.1.0
 url: https://github.com/skeel-x/vrQualityTags
 
 settings:
@@ -20,6 +20,10 @@ settings:
     displayName: Minimum width (px)
     description: Files narrower than this are not measured for projection.
     type: NUMBER
+  measureVrShapedOutside:
+    displayName: Measure VR-shaped files outside the path filter
+    description: A scene outside the path filter is measured too when its file looks like VR from Stash's metadata alone - a 2:1 or square frame at least 3840 wide, or a VR marker in the file name (_LR_180, 3dh, [VR], FISHEYE, MKX200, ...). Other files there are not touched. Default on.
+    type: BOOLEAN
   flat3dFilenameScan:
     displayName: Tag flat 3D files outside the path filter
     description: Scenes outside the path filter whose file name says flat stereoscopic 3D (3D, SBS, Half-SBS, FSBS, LRF, OU, HOU, TAB) get FLAT + SBS or FLAT + TB. Names only, nothing is decoded; other files there are never touched.
@@ -69,7 +73,7 @@ errLog: info
 
 tasks:
   - name: Tag untagged VR scenes
-    description: Measure every matching scene that has no projection tag yet and tag it. Quality tags are refreshed on every scene; flat 3D names are checked outside the path filter.
+    description: Measure every matching scene that has no projection tag yet and tag it. Quality tags are refreshed on every scene. Outside the path filter, VR-shaped files are measured and flat 3D names are checked.
     defaultArgs:
       mode: untagged
   - name: Re-measure and retag all VR scenes

@@ -1,0 +1,87 @@
+name: VR Quality Tags
+description: Companion to stash-vr. Measures each VR file and tags its projection, fisheye lens, stereo layout, eye order and passthrough alpha matte, plus a measured quality tier. Flat 3D files are recognised by name.
+version: 2.0.0
+url: https://github.com/skeel-x/vrQualityTags
+
+settings:
+  pathFilter:
+    displayName: Path filter
+    description: Only scenes whose file path contains this string are tagged (default /VR/). An empty value means the default; use / to tag every scene (ordinary 2D videos then get FLAT).
+    type: STRING
+  readFovWatermark:
+    displayName: Read SLR FOV watermark
+    description: For fisheye files, OCR the burned-in "SLR 190/200/220 FOV" text to pick RF52, MKX200 or MKX220. Needs tesseract. Falls back to plain FISHEYE.
+    type: BOOLEAN
+  overwrite:
+    displayName: Re-measure already-tagged scenes
+    description: Normally a scene that already has a projection tag keeps it and only its quality tag is updated. Turn on to re-measure and replace on every run and hook.
+    type: BOOLEAN
+  minWidth:
+    displayName: Minimum width (px)
+    description: Files narrower than this are not measured for projection.
+    type: NUMBER
+  flat3dFilenameScan:
+    displayName: Tag flat 3D files outside the path filter
+    description: Scenes outside the path filter whose file name says flat stereoscopic 3D (3D, SBS, Half-SBS, FSBS, LRF, OU, HOU, TAB) get FLAT + SBS or FLAT + TB. Names only, nothing is decoded; other files there are never touched.
+    type: BOOLEAN
+  ffmpegPath:
+    displayName: ffmpeg path
+    type: STRING
+  tesseractPath:
+    displayName: tesseract path
+    type: STRING
+  parentTag:
+    displayName: Parent tag
+    description: Collection tag that every quality tag is filed under (e.g. HQ).
+    type: STRING
+  tag8k:
+    displayName: 8K tag name
+    type: STRING
+  tag7k:
+    displayName: 7K tag name
+    type: STRING
+  tag6kHbr:
+    displayName: 6K high-bitrate tag name
+    type: STRING
+  min8kWidth:
+    displayName: 8K minimum width (px)
+    type: NUMBER
+  min7kWidth:
+    displayName: 7K minimum width (px)
+    type: NUMBER
+  min6kWidth:
+    displayName: 6K minimum width (px)
+    type: NUMBER
+  min6kBitrateMbit:
+    displayName: 6K minimum bitrate (Mbit/s)
+    description: A 6K file below this is an upscale, not a high-quality master.
+    type: NUMBER
+
+exec:
+  - python
+  - "{pluginDir}/vrQualityTags.py"
+interface: raw
+errLog: info
+
+tasks:
+  - name: Tag untagged VR scenes
+    description: Measure every matching scene that has no projection tag yet and tag it. Quality tags are refreshed on every scene; flat 3D names are checked outside the path filter.
+    defaultArgs:
+      mode: untagged
+  - name: Re-measure and retag all VR scenes
+    description: Ignore existing tags, measure everything again and replace every tag this plugin manages.
+    defaultArgs:
+      mode: retag
+  - name: Remove all managed tags
+    description: Detach every tag this plugin manages from the matching scenes. The tags themselves are kept.
+    defaultArgs:
+      mode: clear
+
+hooks:
+  - name: Tag on scan
+    description: Measure and tag a scene as soon as it is created or its files change.
+    triggeredBy:
+      - Scene.Create.Post
+      - Scene.Update.Post
+    defaultArgs:
+      mode: hook

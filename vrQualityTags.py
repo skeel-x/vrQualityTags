@@ -445,7 +445,10 @@ def grab(cfg, path, ts, tw, th):
     shape thresholds were validated on; U and V feed the red test. One decode
     serves both.
     """
-    cmd = [cfg["ffmpegPath"], "-nostdin", "-v", "error", "-ss", f"{ts:.3f}", "-i", path,
+    # Decode keyframes only: the nearest keyframe is as good a sample as the
+    # exact timestamp and avoids decoding every frame since the last one
+    # (about 15 s -> 1.3 s per 8K HEVC frame on a network share).
+    cmd = [cfg["ffmpegPath"], "-nostdin", "-v", "error", "-skip_frame", "nokey", "-ss", f"{ts:.3f}", "-i", path,
            "-frames:v", "1", "-vf", f"scale={tw}:{th}:out_range=pc",
            "-pix_fmt", "yuv444p", "-f", "rawvideo", "-"]
     try:
@@ -588,7 +591,7 @@ def read_fov(cfg, path, duration):
             ts = (duration or 1200) * frac
             crop = ("crop=iw/2:ih:0:0,crop=iw*0.50:ih*0.20:iw*0.50:ih*0.00,"
                     "scale=iw*2:-1,format=gray")
-            r = subprocess.run([cfg["ffmpegPath"], "-v", "error", "-y", "-ss", f"{ts:.3f}",
+            r = subprocess.run([cfg["ffmpegPath"], "-nostdin", "-v", "error", "-y", "-skip_frame", "nokey", "-ss", f"{ts:.3f}",
                                 "-i", path, "-frames:v", "1", "-vf", crop, tmp],
                                capture_output=True, timeout=300)
             if r.returncode != 0 or not os.path.exists(tmp):

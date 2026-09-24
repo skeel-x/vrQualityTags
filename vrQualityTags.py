@@ -64,6 +64,9 @@ DEFAULTS = {
     "tesseractPath": "/usr/bin/tesseract",
     # flat 3D outside the VR path, from filenames only
     "flat3dFilenameScan": True,
+    # optional Stash API key; the session Stash hands a task expires after an
+    # hour, which ends long runs part way
+    "apiKey": "",
 }
 
 NUMERIC = ("min8kWidth", "min7kWidth", "min6kWidth", "min6kBitrateMbit", "minWidth")
@@ -707,6 +710,12 @@ class Stash:
         if cookie.get("Name"):
             self.headers["Cookie"] = f"{cookie['Name']}={cookie['Value']}"
 
+    def use_api_key(self, key):
+        """Authenticate with an API key instead of the task's session cookie,
+        which Stash expires after an hour."""
+        self.headers.pop("Cookie", None)
+        self.headers["ApiKey"] = key
+
     def call(self, query, variables=None):
         body = json.dumps({"query": query, "variables": variables or {}}).encode()
         req = urllib.request.Request(self.url, data=body, headers=self.headers)
@@ -905,6 +914,8 @@ def main():
     except Exception:
         stored = {}
     cfg = load_config(stored)
+    if cfg.get("apiKey"):
+        stash.use_api_key(cfg["apiKey"])
     mode = args.get("mode") or "hook"
     if mode == "all":                   # task name of the pre-merge quality plugin
         mode = "untagged"
@@ -935,4 +946,8 @@ if __name__ == "__main__":
         main()
     except Exception as e:
         log("e", f"{type(e).__name__}: {e}")
+        if getattr(e, "code", None) == 401:
+            log("e", "Stash rejected the request. Long tasks outlive the hour-long session "
+                     "Stash gives a plugin; set an API key in the plugin settings "
+                     "(Settings -> Security -> API key) and run the task again.")
         print(json.dumps({"error": str(e)}))

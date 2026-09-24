@@ -190,6 +190,7 @@ Writes are idempotent: a scene whose tags are already right is not written to.
 | Parent tag, 8K/7K/6K tag names | `HQ`, `8K`, `7K`, `6K HBR` | quality tag names |
 | 8K/7K/6K minimum width | 7680, 7000, 5760 | tier boundaries |
 | 6K minimum bitrate (Mbit/s) | 40 | a 6K file below this is treated as an upscale |
+| Stash API key (for long tasks) | empty | Stash ends a plugin task's session after an hour, so a full retag of a large library stops part way with `401 Unauthorized`. Paste your API key (*Settings -> Security*) and the plugin authenticates with it instead. |
 
 Stash shows an untouched on/off setting as off; the plugin treats an untouched
 setting as its default (on for the watermark and the flat 3D check). Switch it

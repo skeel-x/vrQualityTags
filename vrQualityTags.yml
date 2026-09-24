@@ -30,6 +30,10 @@ settings:
   tesseractPath:
     displayName: tesseract path
     type: STRING
+  apiKey:
+    displayName: Stash API key (for long tasks)
+    description: Optional. Stash ends a plugin task's session after an hour, so a full retag of a large library stops part way. With your API key (Settings -> Security) the plugin authenticates with it instead and long runs finish.
+    type: STRING
   parentTag:
     displayName: Parent tag
     description: Collection tag that every quality tag is filed under (e.g. HQ).

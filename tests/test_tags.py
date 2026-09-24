@@ -328,3 +328,15 @@ class MeasureProjection(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestStashAuth(unittest.TestCase):
+    def test_api_key_replaces_session_cookie(self):
+        s = v.Stash({"SessionCookie": {"Name": "session", "Value": "abc"}})
+        self.assertIn("Cookie", s.headers)
+        s.use_api_key("k")
+        self.assertNotIn("Cookie", s.headers)
+        self.assertEqual(s.headers["ApiKey"], "k")
+
+    def test_api_key_defaults_to_empty(self):
+        self.assertEqual(v.load_config({})["apiKey"], "")

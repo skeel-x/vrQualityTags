@@ -401,6 +401,37 @@ class LooksVr(unittest.TestCase):
         self.assertFalse(v.looks_vr(scene(files=[])))
 
 
+class FovSkip(unittest.TestCase):
+    def reason(self, name, screen=v.FISHEYE, alpha=False, folder="/media/VR/A/"):
+        path = folder + name
+        return v.fov_skip_reason(v.parse_filename(path), screen, alpha, path)
+
+    def test_lens_in_filename(self):
+        self.assertEqual(self.reason("SLR_x_MKX200_LR.mp4"), "lens from filename")
+        self.assertEqual(self.reason("x_RF52.mp4", alpha=True), "lens from filename")
+
+    def test_not_fisheye(self):
+        self.assertEqual(self.reason("x.mp4", screen=v.DOME), "not fisheye")
+        self.assertEqual(self.reason("x.mp4", screen=None), "not fisheye")
+        # the filename's screen beats the pixels either way
+        self.assertEqual(self.reason("x_LR_180.mp4"), "not fisheye")
+        self.assertIsNone(self.reason("x_FISHEYE.mp4", screen=v.DOME))
+
+    def test_passthrough_needs_slr(self):
+        self.assertEqual(self.reason("Studio - X [Passthrough].mp4", alpha=True),
+                         "passthrough not from SLR")
+        # "slr" inside another word does not count; at a word start it does
+        self.assertEqual(self.reason("Studio_Weslr_x.mp4", alpha=True),
+                         "passthrough not from SLR")
+        self.assertIsNone(self.reason("SLROriginals_x.mp4", alpha=True))
+        self.assertIsNone(self.reason("SLR Originals - X [Passthrough].mp4", alpha=True))
+        self.assertIsNone(self.reason("x.mp4", alpha=True, folder="/media/VR/SexLikeReal/"))
+        self.assertIsNone(self.reason("x.mp4", alpha=True, folder="/media/VR/SLR/"))
+
+    def test_plain_fisheye_is_read(self):
+        self.assertIsNone(self.reason("Studio - X [VR].mp4"))
+
+
 class MeasureProjection(unittest.TestCase):
     def test_small_or_missing(self):
         c = cfg()
@@ -418,10 +449,29 @@ class MeasureProjection(unittest.TestCase):
                 mock.patch.object(v, "probe", return_value=res), \
                 mock.patch.object(v, "read_fov", return_value=("200", False)) as fov:
             want, why = v.measure_projection(
-                cfg(), scene(path="/media/VR/A/Studio - X [Passthrough] [VR].mp4"))
+                cfg(), scene(path="/media/VR/SLR/SLR Originals - X [Passthrough] [VR].mp4"))
             self.assertEqual(want, {v.FISHEYE, v.MKX200, v.SBS, v.ALPHA})
             self.assertIn("watermark 200", why)
             fov.assert_called_once()
+
+            # another studio's passthrough never carries the SLR watermark
+            fov.reset_mock()
+            want, why = v.measure_projection(
+                cfg(), scene(path="/media/VR/A/Studio - X [Passthrough] [VR].mp4"))
+            self.assertEqual(want, {v.FISHEYE, v.SBS, v.ALPHA})
+            self.assertIn("watermark not read", why)
+            fov.assert_not_called()
+
+            # a filename screen marker that is not fisheye wins over the pixels
+            want, _ = v.measure_projection(cfg(), scene(path="/media/VR/A/x_LR_180.mp4"))
+            self.assertIn(v.DOME, want)
+            fov.assert_not_called()
+
+            # FISHEYE in the name leaves the lens open, so the watermark is read
+            want, _ = v.measure_projection(cfg(), scene(path="/media/VR/SLR/x_FISHEYE.mp4"))
+            self.assertIn(v.MKX200, want)
+            fov.assert_called_once()
+            fov.reset_mock()
 
             fov.reset_mock()
             want, _ = v.measure_projection(cfg(), scene(path="/media/VR/A/x_MKX220.mp4"))

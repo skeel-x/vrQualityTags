@@ -10,7 +10,7 @@ settings:
     type: STRING
   readFovWatermark:
     displayName: Read SLR FOV watermark
-    description: For fisheye files, OCR the burned-in "SLR 190/200/220 FOV" text to pick RF52, MKX200 or MKX220. Needs tesseract. Falls back to plain FISHEYE.
+    description: For fisheye files, OCR the burned-in "SLR 190/200/220 FOV" text to pick RF52, MKX200 or MKX220. Needs tesseract. Falls back to plain FISHEYE. Skipped when the filename names the lens, and for passthrough (corner matte) scenes whose name and path do not mention SLR or SexLikeReal.
     type: BOOLEAN
   overwrite:
     displayName: Re-measure already-tagged scenes

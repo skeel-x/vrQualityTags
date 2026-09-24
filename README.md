@@ -98,8 +98,14 @@ In order of authority:
    top of the frame, centred across the dead space between the eyes (older
    releases: near the top of the left eye); both places are read. Nothing measurable separates those lenses, so where the text is
    readable it is the only authority. Up to eight frames are read with
-   tesseract and two must agree. Only done for a fisheye whose lens the
-   filename left open.
+   tesseract and two must agree. The OCR is skipped when it cannot help:
+   * the filename already names the lens;
+   * the scene does not end up `FISHEYE` (a filename screen marker such as
+     `_180` beats the pixels, so `x_LR_180.mp4` is never read even when the
+     pixels say fisheye);
+   * the scene has the corner alpha matte and neither its file name nor its
+     path mentions `SLR` or `SexLikeReal`: SLR's own passthrough releases carry
+     the watermark, other studios' passthrough scenes never do.
 3. **Frame measurement.** Two frames (40% and 60% into the file, nearest keyframe) are decoded to
    a 256 px thumbnail:
    * *stereo*: correlation between the two halves (side by side, then top and
@@ -212,7 +218,7 @@ scene whose tags are already right is not written to.
 | Setting | Default | Meaning |
 |---|---|---|
 | Path filter | `/VR/` | only scenes whose file path contains this are measured. An empty value means the default; `/` matches every scene (then ordinary 2D videos get `FLAT`). |
-| Read SLR FOV watermark | on | OCR the watermark to pick `RF52`/`MKX200`/`MKX220` |
+| Read SLR FOV watermark | on | OCR the watermark to pick `RF52`/`MKX200`/`MKX220` (skipped where it cannot help, see "How it decides") |
 | Re-measure already-tagged scenes | off | measure scenes that already have a projection tag on every run and hook |
 | Minimum width (px) | 1920 | narrower files are not measured |
 | Measure VR-shaped files outside the path filter | on | measure a scene outside the path filter when its file is a 2:1 or square frame at least 3840 wide or has a VR marker in its name |
@@ -255,7 +261,8 @@ assigned tags would otherwise never see it.
 * The corner-matte test knows one packing: red silhouettes in the corners of
   fisheye stereo. Mattes packed elsewhere are not tagged `Alpha`.
 * Measuring costs two decoded frames per scene (a few seconds for 8K HEVC on a
-  network share) plus up to eight small crops for the watermark.
+  network share) plus, for a fisheye whose lens is still open, up to eight
+  small crops for the watermark.
 
 ## Development
 

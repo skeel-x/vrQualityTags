@@ -14,7 +14,8 @@ WHERE THE ANSWER COMES FROM, IN ORDER OF AUTHORITY
   watermark  SLR burns "SLR 190/200/220 FOV" into the top of the left eye.
              Nothing measurable separates 190 from 200 from 220, so where the
              text exists it is the only authority. Two agreeing frames are
-             required; a single OCR hit is not trusted.
+             required; a single OCR hit is not trusted. Not read where it
+             cannot help: see fov_skip_reason().
 
   pixels     two frames decoded to a 256px thumbnail:
                lr / tb  correlation between the frame halves; a layout is only
@@ -621,6 +622,27 @@ FOV_CROPS = (
 )
 
 
+_SLR_RE = re.compile(r"(?<![a-z0-9])(slr|sexlikereal)", re.IGNORECASE)
+
+
+def fov_skip_reason(fn, screen_px, alpha, path):
+    """Why reading the SLR watermark cannot help this scene, or None when it can.
+
+    The watermark only names a fisheye lens, so there is nothing to read when
+    the filename already names the lens or the scene does not end up FISHEYE
+    (a filename screen marker beats the pixels). SLR's own passthrough
+    releases carry the watermark, other studios' corner-matte scenes never do,
+    so a matte scene is only read when its path mentions SLR / SexLikeReal.
+    """
+    if fn["lens"]:
+        return "lens from filename"
+    if (fn["screen"] or screen_px) != FISHEYE:
+        return "not fisheye"
+    if alpha and not _SLR_RE.search(path or ""):
+        return "passthrough not from SLR"
+    return None
+
+
 def read_fov(cfg, path, duration):
     """Read the burned-in SLR FOV. Requires two agreeing frames."""
     if not os.path.exists(cfg["tesseractPath"]):
@@ -857,11 +879,13 @@ def measure_projection(cfg, scene):
         why += ", named passthrough/alpha but no corner matte"
 
     fov = None
-    # the watermark only matters for a fisheye whose lens the filename left open
-    if cfg["readFovWatermark"] and not fn["lens"] and not fn["screen"] and screen == FISHEYE:
+    skip = fov_skip_reason(fn, screen, alpha, path) if cfg["readFovWatermark"] else "off"
+    if skip is None:
         fov = read_fov(cfg, path, dur)
         if fov:
             why += f", watermark {fov[0]}deg"
+    elif skip == "passthrough not from SLR":
+        why += ", watermark not read (passthrough not from SLR)"
     marks = [k for k in ("stereo", "screen", "lens") if fn[k]] + (["rl"] if fn["rl"] else [])
     if marks:
         why += ", filename " + "+".join(str(fn[k]) if k != "rl" else "RL" for k in marks)

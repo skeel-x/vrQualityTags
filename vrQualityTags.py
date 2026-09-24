@@ -418,7 +418,8 @@ def frame_metrics(rgb, tw, th, wide, grey=None):
 
 
 def combine_frames(frames):
-    """Median of each metric over the frames; the matte must be in every one."""
+    """Median of each metric over the frames; the matte must be in every one
+    (matte_any records whether at least one frame showed it)."""
     if not frames:
         return None
     out = {}
@@ -427,6 +428,9 @@ def combine_frames(frames):
         vals = sorted(f[k] for f in frames)
         out[k] = round(_percentile(vals, 0.5), 4)
     out["matte"] = len(frames) >= 2 and all(f["matte"] for f in frames)
+    # a frame can miss the matte (a fade, a dark cut); when the filename
+    # already says passthrough/alpha, one matching frame is enough
+    out["matte_any"] = any(f["matte"] for f in frames)
     out["frames"] = len(frames)
     return out
 
@@ -765,6 +769,8 @@ def measure_projection(cfg, scene):
 
     fn = parse_filename(path)
     res = probe(cfg, path, w, h, dur)
+    if res and fn["alpha_candidate"] and res.get("matte_any"):
+        res["matte"] = True
     screen, stereo, why = classify(w, h, res)
     alpha = bool(res and res["matte"])
     if res:

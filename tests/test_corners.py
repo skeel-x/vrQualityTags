@@ -90,6 +90,8 @@ class CornerMatte(unittest.TestCase):
         self.assertTrue(v.combine_frames([yes, yes])["matte"])
         self.assertFalse(v.combine_frames([yes, no])["matte"])
         self.assertFalse(v.combine_frames([yes])["matte"])
+        self.assertTrue(v.combine_frames([yes, no])["matte_any"])
+        self.assertFalse(v.combine_frames([no, no])["matte_any"])
 
     def test_rgb_to_grey(self):
         self.assertEqual(v.rgb_to_grey(bytes([255, 0, 0, 100, 100, 100])), bytes([77, 100]))

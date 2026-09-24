@@ -52,7 +52,7 @@ effect in the headset. Tags outside this table are never added or removed.
 | fisheye 200 | `FISHEYE` + `MKX200` |
 | fisheye 220 | `FISHEYE` + `MKX220`, or `VRCA220` when the filename or watermark says VRCA |
 | stereo VR | `SBS` / `TB` |
-| mono VR | `MONO` (with `DOME` or `SPHERE`) |
+| mono VR | `MONO` (with `DOME` or `SPHERE`, or `FISHEYE` for a single-disc fisheye) |
 | right eye first | `RL` (with `SBS`) |
 | flat 2D video | `FLAT` |
 | flat stereoscopic 3D | `FLAT` + `SBS` / `FLAT` + `TB` |
@@ -266,6 +266,13 @@ whose clips mix formats is left without `Alpha` because both frames must agree.
   deletes the file.
 * **Restart the retag from the beginning**: the same retag, but it ignores any
   saved progress and starts from the first scene.
+* **Remove stray MONO tags**: removes `MONO` from every scene, anywhere in the
+  library, that carries no VR projection tag (`DOME`, `SPHERE`, `FISHEYE`, a
+  lens tag, `CUBEMAP` or `EAC`). `MONO` only sets the stereo mode of a VR
+  projection; on a 2D video (left there by older tagging tools, or next to
+  `FLAT`) it means nothing. Nothing is decoded. The two tagging tasks (and the
+  retag restart) do the same after their own pass, so a scene they have just
+  measured already carries its measured tags; the log gives the count.
 * **Remove all managed tags**: detaches the managed tags; the tags themselves
   are kept.
 * **Tag on scan** (hook on scene create and update): the "untagged" logic for

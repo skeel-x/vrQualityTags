@@ -211,7 +211,11 @@ class Library:
         variables = variables or {}
         if "findScenes" in query:
             f = variables["f"]
-            if "MATCHES_REGEX" in query:
+            if "tags:{" in query:
+                kind = "tag"
+                hits = [s for s in self.scenes.values()
+                        if f in {t["id"] for t in s["tags"]}]
+            elif "MATCHES_REGEX" in query:
                 kind = "regex"
                 rx = _re.compile(f)
                 hits = [s for s in self.scenes.values() if rx.search(s["files"][0]["path"])]
@@ -627,3 +631,105 @@ class Resume(unittest.TestCase):
         self.assertEqual(self.run_main(self.library(), "untagged"),
                          ["1", "3", "7", "12", "20"])
         self.assertTrue(os.path.exists(self.path))
+
+
+class StrayMono(unittest.TestCase):
+    def test_selection(self):
+        def stray(*tags):
+            return v.stray_mono(scene(tags=tags))
+        self.assertTrue(stray("MONO"))
+        self.assertTrue(stray("MONO", "FLAT"))
+        self.assertTrue(stray("MONO", "8K", "HQ"))
+        for companion in ("DOME", "SPHERE", "FISHEYE", "RF52", "MKX200", "CUBEMAP"):
+            with self.subTest(companion=companion):
+                self.assertFalse(stray("MONO", companion))
+        self.assertFalse(stray("MONO", "VRP: Skip"))
+        self.assertFalse(stray("FLAT"))
+        self.assertFalse(stray())
+
+    def library(self):
+        flat = [scene(1920, sid=str(i), tags=["MONO"], path=f"/mnt/Sites/S/{i}.mp4")
+                for i in range(100, 250)]             # more than one page
+        return Library(flat + [
+            scene(8192, sid="1", tags=["DOME", "MONO"], path="/media/VR/S/a.mp4"),
+            scene(8192, sid="2", tags=["FISHEYE", "MONO", "8K", "HQ"], path="/media/VR/S/b.mp4"),
+            scene(1920, sid="3", tags=["MONO", "VRP: Skip"], path="/mnt/Sites/S/c.mp4"),
+            scene(1920, sid="4", tags=["MONO", "FLAT", "Virtual Reality"],
+                  path="/mnt/Sites/S/d.mp4"),
+            scene(1920, sid="5", tags=["FLAT"], path="/mnt/Sites/S/e.mp4"),
+        ])
+
+    def tags(self, lib, sid):
+        return {t["name"] for t in lib.scenes[sid]["tags"]}
+
+    def test_tidy(self):
+        lib = self.library()
+        logs = []
+        with mock.patch.object(v, "log", side_effect=lambda lv, m: logs.append(m)):
+            self.assertEqual(v.tidy_mono(lib, IDS), 151)
+        # every stray one, across both pages, although each write shrinks the result
+        for sid in range(100, 250):
+            self.assertEqual(self.tags(lib, str(sid)), set(), sid)
+        self.assertEqual(self.tags(lib, "4"), {"FLAT", "Virtual Reality"})
+        self.assertEqual(self.tags(lib, "1"), {"DOME", "MONO"})
+        self.assertEqual(self.tags(lib, "2"), {"FISHEYE", "MONO", "8K", "HQ"})
+        self.assertEqual(self.tags(lib, "3"), {"MONO", "VRP: Skip"})
+        self.assertEqual(self.tags(lib, "5"), {"FLAT"})
+        self.assertIn("stray MONO: removed from 151 scenes", logs)
+        self.assertEqual({q[0] for q in lib.queries}, {"tag"})
+        # nothing left to do: no writes
+        n = len(lib.writes)
+        with mock.patch.object(v, "log"):
+            self.assertEqual(v.tidy_mono(lib, IDS), 0)
+        self.assertEqual(len(lib.writes), n)
+
+    def run_main(self, lib, mode):
+        payload = {"server_connection": {}, "args": {"mode": mode}}
+        measured = []
+
+        def measure(c, sc):
+            measured.append(sc["id"])
+            return {v.DOME, v.SBS}, "why"
+
+        with mock.patch.object(v, "Stash", return_value=lib), \
+                mock.patch.object(v, "ensure_tags", return_value=IDS), \
+                mock.patch.object(v, "load_config", return_value=cfg()), \
+                mock.patch.object(v, "measure_projection", side_effect=measure), \
+                mock.patch.object(v, "RetagState") as rs, \
+                mock.patch.object(v, "log"), mock.patch("builtins.print"), \
+                mock.patch("sys.stdin", io.StringIO(json.dumps(payload))):
+            rs.load.return_value = None
+            rs.return_value.last_id = None
+            v.main()
+        return measured
+
+    def small_library(self):
+        return Library([
+            # in the VR path, not yet measured: the measurement settles its MONO
+            scene(8192, sid="1", tags=["MONO"], path="/media/VR/S/a.mp4"),
+            scene(1920, sid="2", tags=["MONO"], path="/mnt/Sites/S/b.mp4"),
+            scene(1920, sid="3", tags=["MONO", "VRP: Skip"], path="/mnt/Sites/S/c.mp4"),
+        ])
+
+    def test_tagging_tasks_tidy_after_their_pass(self):
+        for mode in ("untagged", "retag"):
+            with self.subTest(mode=mode):
+                lib = self.small_library()
+                self.assertEqual(self.run_main(lib, mode), ["1"])
+                self.assertEqual(self.tags(lib, "1"), {"DOME", "SBS", "8K", "HQ"})
+                self.assertEqual(self.tags(lib, "2"), set())
+                self.assertEqual(self.tags(lib, "3"), {"MONO", "VRP: Skip"})
+                # scene 1 was written once, by the measurement, not by the tidy
+                self.assertEqual([w["id"] for w in lib.writes], ["1", "2"])
+
+    def test_tidy_task_measures_nothing(self):
+        lib = self.small_library()
+        self.assertEqual(self.run_main(lib, "tidy_mono"), [])
+        self.assertEqual(self.tags(lib, "1"), set())
+        self.assertEqual(self.tags(lib, "2"), set())
+        self.assertEqual(self.tags(lib, "3"), {"MONO", "VRP: Skip"})
+
+    def test_clear_does_not_tidy(self):
+        lib = self.small_library()
+        self.run_main(lib, "clear")
+        self.assertEqual(self.tags(lib, "2"), {"MONO"})

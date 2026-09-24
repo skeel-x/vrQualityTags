@@ -84,6 +84,10 @@ tasks:
     description: Like "Re-measure and retag all VR scenes", but ignores the progress an interrupted run left behind and starts from the first scene.
     defaultArgs:
       mode: retag_fresh
+  - name: Remove stray MONO tags
+    description: "Remove MONO from every scene that carries no VR projection tag (DOME, SPHERE, FISHEYE or a fisheye lens), such as 2D videos tagged by older tools. Nothing is measured. The two tagging tasks do this too, after their own pass. Scenes with VRP: Skip are left alone."
+    defaultArgs:
+      mode: tidy_mono
   - name: Remove all managed tags
     description: Detach every tag this plugin manages from the matching scenes. The tags themselves are kept.
     defaultArgs:

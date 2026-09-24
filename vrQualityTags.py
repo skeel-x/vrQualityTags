@@ -946,6 +946,11 @@ SCENE_PAGE_BIG = """query($p:Int!,$f:String!){findScenes(
   count scenes{%s}}}""" % SCENE_FIELDS
 VR_NAME_PATH_REGEX = r"(?i)(^|[^a-z0-9])(vr|180|360|fisheye|3dh|3dv|mkx|vrca|rf)"
 SCENE_UPDATE = "mutation($i:SceneUpdateInput!){sceneUpdate(input:$i){id}}"
+# every scene carrying one tag, for the stray MONO tidy
+SCENE_PAGE_TAG = """query($p:Int!,$f:ID!){findScenes(
+  scene_filter:{tags:{value:[$f],modifier:INCLUDES,depth:0}},
+  filter:{per_page:100,page:$p,sort:"id",direction:ASC}){
+  count scenes{%s}}}""" % SCENE_FIELDS
 
 
 def ensure_tags(stash, cfg):
@@ -1222,6 +1227,44 @@ def run_all(stash, cfg, ids, mode, state=None):
     log("i", f"done ({mode}): {len(todo) - start} scenes examined, {changed} changed")
 
 
+# MONO only means something next to a VR projection: stash-vr's MONO rule sets
+# the stereo mode, and without a projection the scene plays flat anyway.
+# This plugin writes it with DOME and SPHERE, and with FISHEYE (and so a lens)
+# for a single-disc fisheye.
+MONO_COMPANIONS = (DOME, SPHERE, FISHEYE) + LENS_TAGS + ("CUBEMAP", "EAC")
+
+
+def stray_mono(scene):
+    """Whether a scene carries MONO without any VR projection tag (left behind
+    on 2D videos by older tagging, or next to FLAT). VRP: Skip scenes are never
+    touched."""
+    have = {t["name"] for t in scene.get("tags") or []}
+    return MONO in have and SKIP not in have and not have & set(MONO_COMPANIONS)
+
+
+def tidy_mono(stash, ids):
+    """Remove MONO from every scene where it is stray; returns how many.
+
+    Runs after the measuring pass of a task, so every scene that pass measured
+    already carries what the measurement says and anything still stray is
+    left over. The candidates are all collected before the first write: the
+    writes shrink the tag query's result, which would shift later pages.
+    """
+    todo = [sc for sc, _ in _pages(stash, SCENE_PAGE_TAG, ids[MONO]) if stray_mono(sc)]
+    removed = 0
+    for sc in todo:
+        keep = sorted({t["id"] for t in sc.get("tags") or []} - {ids[MONO]})
+        try:
+            stash.call(SCENE_UPDATE, {"i": {"id": sc["id"], "tag_ids": keep}})
+        except Exception as e:
+            log("e", f"scene {sc['id']}: {type(e).__name__}: {e}")
+            continue
+        removed += 1
+        log("i", f"scene {sc['id']}: stray MONO removed (no DOME, SPHERE or FISHEYE)")
+    log("i", f"stray MONO: removed from {removed} scenes")
+    return removed
+
+
 def route(cfg, scene):
     """The handler for one scene in the hook, or None to leave it alone."""
     if not scene:
@@ -1260,8 +1303,14 @@ def main():
                 log("i", "retag from the beginning; any saved progress is discarded")
             state = RetagState(path)
         run_all(stash, cfg, ids, "retag", state)
-    elif mode in ("untagged", "clear"):
+        tidy_mono(stash, ids)
+    elif mode == "untagged":
         run_all(stash, cfg, ids, mode)
+        tidy_mono(stash, ids)
+    elif mode == "clear":
+        run_all(stash, cfg, ids, mode)
+    elif mode == "tidy_mono":
+        tidy_mono(stash, ids)
     else:
         ctx = args.get("hookContext") or {}
         sid = ctx.get("id") or args.get("scene_id")

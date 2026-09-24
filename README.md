@@ -187,14 +187,24 @@ whose clips mix formats is left without `Alpha` because both frames must agree.
   scene there, measures VR-shaped files outside the path filter, and runs the
   flat 3D filename check elsewhere.
 * **Re-measure and retag all VR scenes**: measures everything under the path
-  filter again and replaces every tag the plugin manages.
+  filter (and the VR-shaped files outside it) again and replaces every tag the
+  plugin manages. The run is resumable: scenes are visited in ascending id
+  order and after each one the plugin records the scene id and the run's start
+  time in `vrQualityTags.state.json` in the plugin directory. Running the task
+  again after an interruption (a cancelled task, a Stash restart, an expired
+  session) logs "resuming after scene N" and continues from there, as long as
+  the interrupted run started less than 7 days ago. A run that completes
+  deletes the file.
+* **Restart the retag from the beginning**: the same retag, but it ignores any
+  saved progress and starts from the first scene.
 * **Remove all managed tags**: detaches the managed tags; the tags themselves
   are kept.
 * **Tag on scan** (hook on scene create and update): the "untagged" logic for
   one scene. Updates that only changed tags are ignored, so the plugin's own
   writes do not trigger it again.
 
-Writes are idempotent: a scene whose tags are already right is not written to.
+Task progress is reported to Stash after every scene. Writes are idempotent: a
+scene whose tags are already right is not written to.
 `VRP: Skip` makes every task and the hook leave a scene alone.
 
 ## Settings

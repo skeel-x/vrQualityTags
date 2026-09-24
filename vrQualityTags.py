@@ -45,6 +45,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.request
 
 DEFAULTS = {
@@ -964,15 +965,96 @@ def candidates(stash, cfg):
     return sorted(chosen.values(), key=lambda c: int(c[0]["id"]))
 
 
-def run_all(stash, cfg, ids, mode):
+STATE_FILE = "vrQualityTags.state.json"
+RESUME_MAX_AGE = 7 * 86400          # an older unfinished retag starts over
+
+
+def progress(fraction):
+    # Stash reads "\x01p\x02<float>" as the task's progress, 0 to 1
+    log("p", f"{min(1.0, max(0.0, fraction)):.4f}")
+
+
+def state_path(conn):
+    """The resume state lives next to the plugin: Stash passes its directory as
+    server_connection.PluginDir."""
+    d = (conn or {}).get("PluginDir") or os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(d, STATE_FILE)
+
+
+class RetagState:
+    """Where an unfinished retag stopped: the last scene it completed and when
+    the run started. Scenes are visited in ascending id order, so everything up
+    to that id is done."""
+
+    def __init__(self, path, now=None):
+        self.path = path
+        self.started = time.time() if now is None else now
+        self.last_id = None
+        self.warned = False
+
+    @classmethod
+    def load(cls, path, now=None):
+        """The saved state of an unfinished retag, or None when there is none,
+        it is unreadable or older than RESUME_MAX_AGE."""
+        now = time.time() if now is None else now
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        started, last = data.get("started"), data.get("last_id")
+        if not isinstance(started, (int, float)) or isinstance(started, bool):
+            return None
+        if not isinstance(last, int) or isinstance(last, bool):
+            return None
+        if not 0 <= now - started < RESUME_MAX_AGE:
+            return None
+        st = cls(path, started)
+        st.last_id = last
+        return st
+
+    def done(self, scene_id):
+        self.last_id = int(scene_id)
+        tmp = self.path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"started": self.started, "last_id": self.last_id}, f)
+            os.replace(tmp, self.path)
+        except OSError as e:
+            if not self.warned:
+                self.warned = True
+                log("w", f"cannot save the resume state to {self.path}: {e}; "
+                         "an interrupted retag will start over")
+
+    def clear(self):
+        for p in (self.path, self.path + ".tmp"):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+
+def run_all(stash, cfg, ids, mode, state=None):
+    """One task run over every candidate scene. state (a RetagState) makes the
+    run resumable: scenes up to state.last_id are skipped, each completed scene
+    is recorded, and the state is cleared once the run completes."""
     todo = candidates(stash, cfg)
     kinds = {}
     for _, _, kind in todo:
         kinds[kind] = kinds.get(kind, 0) + 1
     log("i", f"{mode}: {len(todo)} scenes to examine ("
              + ", ".join(f"{n} {k}" for k, n in sorted(kinds.items())) + ")")
+    start = 0
+    if state is not None and state.last_id is not None:
+        start = sum(1 for sc, _, _ in todo if int(sc["id"]) <= state.last_id)
+        log("i", f"resuming after scene {state.last_id}: {start} of {len(todo)} scenes "
+                 f"already done by the run started "
+                 f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(state.started))}")
+    progress(start / len(todo) if todo else 1.0)
     changed = 0
-    for n, (sc, handler, _) in enumerate(todo, 1):
+    for n, (sc, handler, _) in enumerate(todo[start:], start + 1):
         try:
             r = handler(stash, cfg, sc, ids, mode)
         except Exception as e:
@@ -981,10 +1063,12 @@ def run_all(stash, cfg, ids, mode):
         if r:
             changed += 1
             log("i", f"scene {sc['id']}: {r}")
-        if n % 20 == 0 or n == len(todo):
-            # Stash parses the progress line as a float between 0 and 1
-            log("p", f"{n / len(todo):.4f}")
-    log("i", f"done ({mode}): {len(todo)} scenes examined, {changed} changed")
+        if state is not None:
+            state.done(sc["id"])
+        progress(n / len(todo))
+    if state is not None:
+        state.clear()
+    log("i", f"done ({mode}): {len(todo) - start} scenes examined, {changed} changed")
 
 
 def route(cfg, scene):
@@ -1017,7 +1101,15 @@ def main():
         mode = "untagged"
     ids = ensure_tags(stash, cfg)
 
-    if mode in ("untagged", "retag", "clear"):
+    if mode in ("retag", "retag_fresh"):
+        path = state_path(payload.get("server_connection"))
+        state = RetagState.load(path) if mode == "retag" else None
+        if state is None:
+            if mode == "retag_fresh":
+                log("i", "retag from the beginning; any saved progress is discarded")
+            state = RetagState(path)
+        run_all(stash, cfg, ids, "retag", state)
+    elif mode in ("untagged", "clear"):
         run_all(stash, cfg, ids, mode)
     else:
         ctx = args.get("hookContext") or {}

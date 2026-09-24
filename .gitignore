@@ -1,3 +1,5 @@
 __pycache__/
 *.pyc
 _site/
+vrQualityTags.state.json
+vrQualityTags.state.json.tmp

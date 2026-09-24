@@ -1,5 +1,7 @@
 import io
 import json
+import os
+import time
 import unittest
 from unittest import mock
 
@@ -446,3 +448,132 @@ class TestStashAuth(unittest.TestCase):
 
     def test_api_key_defaults_to_empty(self):
         self.assertEqual(v.load_config({})["apiKey"], "")
+
+
+class Resume(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.dir = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.dir.name, v.STATE_FILE)
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def library(self):
+        return Library([scene(8192, sid=str(i), path=f"/media/VR/S/{i}.mp4")
+                        for i in (3, 1, 12, 7, 20)])
+
+    def run_retag(self, lib, state, fail_on=None):
+        seen, logs = [], []
+
+        def measure(c, sc):
+            seen.append(sc["id"])
+            if sc["id"] == fail_on:
+                raise KeyboardInterrupt           # the task is killed mid-scene
+            return {v.DOME, v.SBS}, "why"
+
+        with mock.patch.object(v, "measure_projection", side_effect=measure), \
+                mock.patch.object(v, "log", side_effect=lambda lv, m: logs.append((lv, m))):
+            try:
+                v.run_all(lib, cfg(), IDS, "retag", state)
+            except KeyboardInterrupt:
+                pass
+        return seen, logs
+
+    def saved(self):
+        with open(self.path) as f:
+            return json.load(f)
+
+    def test_state_path(self):
+        self.assertEqual(v.state_path({"PluginDir": "/x/plugins/vrq"}),
+                         os.path.join("/x/plugins/vrq", v.STATE_FILE))
+        here = os.path.dirname(os.path.abspath(v.__file__))
+        self.assertEqual(v.state_path({}), os.path.join(here, v.STATE_FILE))
+        self.assertEqual(v.state_path(None), os.path.join(here, v.STATE_FILE))
+
+    def test_progress_per_scene_in_id_order(self):
+        lib = self.library()
+        seen, logs = self.run_retag(lib, v.RetagState(self.path, 1000.0))
+        self.assertEqual(seen, ["1", "3", "7", "12", "20"])
+        prog = [m for lv, m in logs if lv == "p"]
+        self.assertEqual(prog, ["0.0000", "0.2000", "0.4000", "0.6000", "0.8000", "1.0000"])
+        for p in prog:
+            self.assertTrue(0.0 <= float(p) <= 1.0)
+        # a completed run leaves no state behind
+        self.assertFalse(os.path.exists(self.path))
+
+    def test_interrupted_run_resumes_after_last_scene(self):
+        lib = self.library()
+        now = time.time()
+        seen, _ = self.run_retag(lib, v.RetagState(self.path, now - 60), fail_on="12")
+        self.assertEqual(seen, ["1", "3", "7", "12"])
+        self.assertEqual(self.saved(), {"started": now - 60, "last_id": 7})
+
+        state = v.RetagState.load(self.path)
+        self.assertEqual((state.last_id, state.started), (7, now - 60))
+        seen, logs = self.run_retag(lib, state)
+        self.assertEqual(seen, ["12", "20"])
+        self.assertTrue(any("resuming after scene 7" in m for _, m in logs))
+        self.assertIn(("p", "0.6000"), logs)
+        self.assertFalse(os.path.exists(self.path))
+
+    def test_stale_or_broken_state_is_ignored(self):
+        now = 10 * 86400.0
+
+        def load(data):
+            with open(self.path, "w") as f:
+                f.write(data if isinstance(data, str) else json.dumps(data))
+            return v.RetagState.load(self.path, now)
+
+        self.assertIsNone(v.RetagState.load(self.path, now))          # no file
+        self.assertIsNotNone(load({"started": now - 6.9 * 86400, "last_id": 5}))
+        self.assertIsNone(load({"started": now - 7 * 86400, "last_id": 5}))
+        self.assertIsNone(load({"started": now + 60, "last_id": 5}))  # clock went back
+        self.assertIsNone(load({"started": now, "last_id": "5"}))
+        self.assertIsNone(load({"started": True, "last_id": 5}))
+        self.assertIsNone(load({"last_id": 5}))
+        self.assertIsNone(load([1, 2]))
+        self.assertIsNone(load("{not json"))
+
+    def test_unwritable_state_warns_once_and_carries_on(self):
+        lib = self.library()
+        state = v.RetagState(os.path.join(self.dir.name, "missing", "s.json"))
+        seen, logs = self.run_retag(lib, state)
+        self.assertEqual(len(seen), 5)
+        self.assertEqual(sum(1 for lv, _ in logs if lv == "w"), 1)
+
+    def run_main(self, lib, mode):
+        payload = {"server_connection": {"PluginDir": self.dir.name}, "args": {"mode": mode}}
+        seen = []
+
+        def measure(c, sc):
+            seen.append(sc["id"])
+            return {v.DOME, v.SBS}, "why"
+
+        with mock.patch.object(v, "Stash", return_value=lib), \
+                mock.patch.object(v, "ensure_tags", return_value=IDS), \
+                mock.patch.object(v, "load_config", return_value=cfg()), \
+                mock.patch.object(v, "measure_projection", side_effect=measure), \
+                mock.patch.object(v, "log"), mock.patch("builtins.print"), \
+                mock.patch("sys.stdin", io.StringIO(json.dumps(payload))):
+            v.main()
+        return seen
+
+    def test_retag_task_resumes_and_fresh_task_does_not(self):
+        with open(self.path, "w") as f:
+            json.dump({"started": time.time() - 3600, "last_id": 7}, f)
+        self.assertEqual(self.run_main(self.library(), "retag"), ["12", "20"])
+        self.assertFalse(os.path.exists(self.path))
+
+        with open(self.path, "w") as f:
+            json.dump({"started": time.time() - 3600, "last_id": 7}, f)
+        self.assertEqual(self.run_main(self.library(), "retag_fresh"),
+                         ["1", "3", "7", "12", "20"])
+        self.assertFalse(os.path.exists(self.path))
+
+    def test_untagged_and_clear_ignore_the_state(self):
+        with open(self.path, "w") as f:
+            json.dump({"started": time.time() - 3600, "last_id": 7}, f)
+        self.assertEqual(self.run_main(self.library(), "untagged"),
+                         ["1", "3", "7", "12", "20"])
+        self.assertTrue(os.path.exists(self.path))

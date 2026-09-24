@@ -93,8 +93,9 @@ In order of authority:
    * `Passthrough`, `Pass-Through`, `Alpha`, `alphapacked` only make a scene an
      `Alpha` candidate; the pixels decide.
    * Markers that contradict each other cancel out.
-2. **SLR FOV watermark.** SLR burns `SLR 190/200/220 FOV` into the top of the
-   left eye. Nothing measurable separates those lenses, so where the text is
+2. **SLR FOV watermark.** SLR burns `SLR 190/200/220° FOV FISHEYE` into the
+   top of the frame, centred across the dead space between the eyes (older
+   releases: near the top of the left eye); both places are read. Nothing measurable separates those lenses, so where the text is
    readable it is the only authority. Up to eight frames are read with
    tesseract and two must agree. Only done for a fisheye whose lens the
    filename left open.

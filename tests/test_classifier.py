@@ -179,6 +179,14 @@ class Resolve(unittest.TestCase):
     def test_fov_from_text(self):
         self.assertEqual(v.fov_from_text("SLR 200° FOV Fisheye"), ("200", False))
         self.assertEqual(v.fov_from_text("SLR 190o FOV"), ("190", False))
+        # real OCR output of the centred watermark and of a crop split at the seam
+        self.assertEqual(v.fov_from_text("SLR 190° FOV FISHEYE a Uf * Watch in SLR App"), ("190", False))
+        self.assertEqual(v.fov_from_text("oe D SLR 190° FC VY jy"), ("190", False))
+        # degree sign lost or misread
+        self.assertEqual(v.fov_from_text("SLR 220 FOV"), ("220", False))
+        self.assertEqual(v.fov_from_text("SLR 2200 FOV FISHEYE"), ("220", False))
+        self.assertEqual(v.fov_from_text("SLR 190 F0V"), ("190", False))
+        self.assertIsNone(v.fov_from_text("room 200 people"))
         self.assertEqual(v.fov_from_text("VRCA 220° lens"), ("220", True))
         self.assertIsNone(v.fov_from_text("Watch in SLR app"))
         self.assertIsNone(v.fov_from_text(None))

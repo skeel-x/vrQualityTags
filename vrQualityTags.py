@@ -588,15 +588,28 @@ def resolve(fn, screen_px, stereo_px, alpha_px, fov=None):
     return want
 
 
-_FOV_RE = re.compile(r"\b(180|190|200|220)\s*[°oO]")
+# "190°" (OCR often renders the degree sign as o, O, 0 or º), or the number
+# directly before "FOV" when the sign is lost altogether
+_FOV_RE = re.compile(r"\b(180|190|200|220)\s*[°oOº]")
+_FOV_WORD_RE = re.compile(r"\b(180|190|200|220)\s*[°oOº0*]?\s*F\s*[O0]\s*V\b", re.IGNORECASE)
 
 
 def fov_from_text(txt):
     """(fov, vrca) from one OCR pass, or None."""
-    m = _FOV_RE.search(txt or "")
+    m = _FOV_RE.search(txt or "") or _FOV_WORD_RE.search(txt or "")
     if not m:
         return None
     return m.group(1), "vrca" in (txt or "").lower()
+
+
+# Where SLR burns the "SLR 190° FOV FISHEYE" text: centred at the top of the
+# frame, across the dead space between the two eyes (current releases), or
+# near the top of the left eye's right half (older ones). The centre crop is
+# tried first; a crop that splits the text at the seam still often reads.
+FOV_CROPS = (
+    "crop=iw*0.40:ih*0.12:iw*0.30:0,scale=iw*2:-1,format=gray",
+    "crop=iw/2:ih:0:0,crop=iw*0.50:ih*0.20:iw*0.50:ih*0.00,scale=iw*2:-1,format=gray",
+)
 
 
 def read_fov(cfg, path, duration):
@@ -608,16 +621,19 @@ def read_fov(cfg, path, duration):
     try:
         for frac in (0.30, 0.50, 0.70, 0.20, 0.60, 0.80, 0.40, 0.90):
             ts = (duration or 1200) * frac
-            crop = ("crop=iw/2:ih:0:0,crop=iw*0.50:ih*0.20:iw*0.50:ih*0.00,"
-                    "scale=iw*2:-1,format=gray")
-            r = subprocess.run([cfg["ffmpegPath"], "-nostdin", "-v", "error", "-y", "-skip_frame", "nokey", "-ss", f"{ts:.3f}",
-                                "-i", path, "-frames:v", "1", "-vf", crop, tmp],
-                               capture_output=True, timeout=300)
-            if r.returncode != 0 or not os.path.exists(tmp):
-                continue
-            txt = subprocess.run([cfg["tesseractPath"], tmp, "-", "--psm", "6"],
-                                 capture_output=True, text=True, timeout=120).stdout
-            hit = fov_from_text(txt)
+            hit = None
+            for crop in FOV_CROPS:
+                r = subprocess.run([cfg["ffmpegPath"], "-nostdin", "-v", "error", "-y",
+                                    "-skip_frame", "nokey", "-ss", f"{ts:.3f}",
+                                    "-i", path, "-frames:v", "1", "-vf", crop, tmp],
+                                   capture_output=True, timeout=300)
+                if r.returncode != 0 or not os.path.exists(tmp):
+                    continue
+                txt = subprocess.run([cfg["tesseractPath"], tmp, "-", "--psm", "6"],
+                                     capture_output=True, text=True, timeout=120).stdout
+                hit = fov_from_text(txt)
+                if hit:
+                    break
             if hit:
                 votes[hit] = votes.get(hit, 0) + 1
                 if votes[hit] >= 2:

@@ -108,11 +108,16 @@ In order of authority:
      the watermark, other studios' passthrough scenes never do.
 3. **Frame measurement.** Two frames (40% and 60% into the file, nearest keyframe) are decoded to
    a 256 px thumbnail:
-   * *stereo*: correlation between the two halves (side by side, then top and
-     bottom). A layout only counts if it leaves a plausible eye shape.
-   * *eye shape*: a square eye is 180, a 2:1 eye is 360, a 16:9 or 16:10 eye is
-     flat video. A full side-by-side flat 3D file (7680x2160, aspect 3.2-3.7)
-     is two 16:9 eyes, so it reads as `FLAT` + `SBS`, not as a 180 pair.
+   * *stereo*: how well the two halves match (side by side, and top and
+     bottom), searched for parallax; see [Stereo and 360](#stereo-and-360). A
+     layout only counts if it leaves a plausible eye shape; when both layouts
+     qualify, the better match wins.
+   * *eye shape*: a square eye is 180, a 2:1 eye is 360 (but see below), a
+     16:9, 16:10 or DCI 4K (1.9:1) eye is flat video. A full side-by-side flat
+     3D file (7680x2160, aspect 3.2-3.8) is two 16:9 eyes, so it reads as
+     `FLAT` + `SBS`, not as a 180 pair.
+   * *360 seam*: a mono 2:1 frame is only `SPHERE` when its right edge
+     continues into its left edge.
    * *disc or barrel*: within a square eye, a fisheye is a disc (as wide as
      high, black outside the inscribed circle) and a 180 equirect a barrel
      (full width, wider than high). Darkness alone cannot tell them apart, both
@@ -120,6 +125,45 @@ In order of authority:
    * *corner matte*: see below.
    * *packed-alpha guard*: a near-binary lower half is a matte, not a second
      eye; such a file gets `VRP: Unresolved` instead of a wrong `TB`.
+
+## Stereo and 360
+
+The two eyes of a stereo pair are not the same picture. Everything is shifted
+sideways by its parallax, and in a 180 close-up the performer can be shifted by
+several per cent of the eye width while the room behind barely moves. Matching
+the halves pixel for pixel therefore reads many close-ups as mono, and a mono
+2:1 frame looks exactly like a 360.
+
+**Stereo match.** One eye is cut into 32 px tiles (on the 256 px thumbnail);
+tiles without texture (standard deviation below 6: black borders, fades) are
+skipped. Each remaining tile is correlated with the other eye at horizontal
+shifts of up to 6% of the eye width, coarse to fine, and keeps its best match.
+Parallax is horizontal in both layouts, so top/bottom pairs are searched
+sideways as well. The match of a layout is the median over the tiles of both
+frames, so one frame that is a fade or a title card cannot drag a pair down; a
+frame with textured tiles in less than a quarter of the eye is not measured at
+all. Side by side is accepted at a median of 0.55, top and bottom at 0.60.
+
+**360 seam.** In a 360 equirect the last column and the first are neighbours
+on the sphere. The seam ratio is the mean difference between those two
+columns divided by the median difference between columns half the picture
+apart: near 0 for a 360, around 1 when the edges are unrelated. Edges with
+almost no texture (standard deviation below 5, such as black borders) give no
+answer. Every frame that gives an answer must close the seam; the threshold is
+0.25.
+
+A mono 2:1 frame (no layout accepted) is then:
+
+* `SPHERE` + `MONO` when the seam closes;
+* otherwise `DOME` + `SBS` when the stereo match is at least 0.30: a 180 pair
+  whose halves match poorly, which is far more common than a 360 without a
+  seam;
+* otherwise `VRP: Unresolved`: halves with nothing in common and no seam are
+  neither (typically flat video in a 2:1 frame).
+
+A 2:1 frame whose top and bottom halves match is a top/bottom 360 with each
+eye squeezed to 4:1 (early 360 releases) when each eye's seam closes; it gets
+`SPHERE` + `TB`.
 
 ## Outside the path filter
 
@@ -165,9 +209,28 @@ not named as such, and a file named "Passthrough" can be an ordinary 180 scene.
 
 ## How detection was calibrated
 
-The shape rules (stereo correlation, eye aspect, disc versus barrel, the
-packed-alpha guard) were validated against a hand-checked set of scenes of
-every layout; the disc rule is `bbox in [0.94, 1.06] and blk_out >= 0.72`.
+The shape rules (eye aspect, disc versus barrel, the packed-alpha guard) were
+validated against a hand-checked set of scenes of every layout; the disc rule
+is `bbox in [0.94, 1.06] and blk_out >= 0.72`.
+
+The stereo and seam thresholds come from two frames each of about 140 scenes:
+180 side-by-side pairs (among them several dozen close-ups that pixel-aligned
+correlation had called mono), 360 top/bottom files, fisheye and passthrough
+pairs, flat 2D and flat 3D files, and flat video in 2:1 frames. The eyes of
+the 360 top/bottom files served as genuine mono 360 pictures.
+
+| Group | Stereo match (median over tiles) | Seam ratio |
+|---|---|---|
+| 180 side-by-side pairs, close-ups included | 0.44 - 0.96 | 0.84 - 1.22 where the match is below 0.55 |
+| fisheye and passthrough pairs | 0.62 - 1.00 | (not needed) |
+| one eye of a 360 (mono 360 picture) | -0.01 - 0.46 | 0.00 - 0.13 |
+| flat video in a 2:1 frame | 0.10 - 0.14 | 1.47 - 1.59 |
+
+Pixel-aligned, the same 180 close-ups scored as low as 0.33, well inside the
+mono range. The seam ratio of 180 pairs with a good stereo match reaches down
+to about 0.35 (dark, similar walls at both outer edges), which is why the seam
+only decides between mono readings and never overrides an accepted stereo
+layout.
 
 The corner-matte thresholds come from two frames each of several dozen
 passthrough scenes from different studios, a random sample of plain fisheye
@@ -253,6 +316,8 @@ assigned tags would otherwise never see it.
 
 * Only two frames are measured. A scene that changes format halfway (a
   compilation) is classified by those two frames.
+* A mono 360 whose halves happen to match (0.55 or more) is read as a 180
+  pair; the seam is only consulted when no stereo layout is accepted.
 * The FOV of a fisheye cannot be measured. Without a filename marker or a
   readable SLR watermark it stays plain `FISHEYE`.
 * Flat 3D outside the path filter is recognised by name only. A title word such

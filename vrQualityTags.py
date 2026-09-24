@@ -18,8 +18,12 @@ WHERE THE ANSWER COMES FROM, IN ORDER OF AUTHORITY
              cannot help: see fov_skip_reason().
 
   pixels     two frames decoded to a 256px thumbnail:
-               lr / tb  correlation between the frame halves; a layout is only
-                        accepted if it implies a plausible eye shape.
+               lr / tb  how well the frame halves match, tile by tile, with
+                        the parallax between the eyes searched; a layout is
+                        only accepted if it implies a plausible eye shape.
+               wrap     whether the right edge continues into the left one:
+                        only then is a mono 2:1 frame a 360 (stereo_tiles(),
+                        wrap_ratio()).
                bbox     shape of the lit region of one eye: a fisheye is a disc
                         (as wide as high), a 180 equirect a barrel (wider).
                corners  outside the inscribed circle of each eye a fisheye is
@@ -42,6 +46,7 @@ and arithmetic over a 256px thumbnail does not need them.
 """
 import json
 import math
+import operator
 import os
 import re
 import subprocess
@@ -101,6 +106,18 @@ FOV_LENS = {"190": RF52, "200": MKX200, "220": MKX220}
 ANALYSIS_W = 256
 ALPHA_BIMODAL = 0.75    # lower half this binary is a matte, not a second eye
 FISH_BBOX_LO, FISH_BBOX_HI, FISH_BLKOUT = 0.94, 1.06, 0.72
+
+# Stereo and 360 (see README "How detection was calibrated").
+STEREO_TILE = 32            # tile side in thumbnail pixels
+STEREO_TILE_MIN_STD = 6     # a tile flatter than this has nothing to match
+STEREO_SHIFT = 0.06         # parallax searched, as a fraction of the eye width
+SBS_MIN, TB_MIN = 0.55, 0.60    # median tile match of a stereo pair
+STEREO_NONE = 0.30          # below this the halves have nothing in common
+MIN_TEXTURED = 0.25         # share of textured tiles below which a frame is a
+                            # fade or a title card and is not measured
+WRAP_MAX = 0.25             # seam difference / far difference of a 360
+WRAP_MIN_STD = 5            # edge columns flatter than this prove nothing
+WRAP_MIN_FAR = 4
 
 # Corner matte (see README "How detection was calibrated").
 MATTE_RED_MIN = 96          # R of a matte pixel after downscaling
@@ -241,32 +258,92 @@ def _masks(ew, eh):
     return _MASK_CACHE[key]
 
 
-def _corr(buf, w, h, ax, ay, bx, by, cw, ch):
-    """Correlation between two equally sized windows of a greyscale buffer."""
-    n = cw * ch
-    if n < 64:
+def _window(buf, w, x, y, cw, ch):
+    """Rows of a cw x ch window of a greyscale buffer, with its sum and sum of
+    squares."""
+    rows = [buf[(y + j) * w + x:(y + j) * w + x + cw] for j in range(ch)]
+    return (rows, sum(sum(r) for r in rows),
+            sum(sum(map(operator.mul, r, r)) for r in rows))
+
+
+def _wcorr(a, b):
+    """Correlation between two equally sized windows from _window()."""
+    ra, sa, qa = a
+    rb, sb, qb = b
+    n = len(ra) * len(ra[0])
+    cross = sum(sum(map(operator.mul, x, y)) for x, y in zip(ra, rb))
+    va, vb = qa - sa * sa / n, qb - sb * sb / n
+    if va <= 0 or vb <= 0:
         return 0.0
-    sa = sb = 0
-    for j in range(ch):
-        ra = (ay + j) * w + ax
-        rb = (by + j) * w + bx
-        sa += sum(buf[ra:ra + cw])
-        sb += sum(buf[rb:rb + cw])
-    ma, mb = sa / n, sb / n
-    num = da = db = 0.0
-    for j in range(ch):
-        ra = (ay + j) * w + ax
-        rb = (by + j) * w + bx
-        rowa = buf[ra:ra + cw]
-        rowb = buf[rb:rb + cw]
-        for k in range(cw):
-            u = rowa[k] - ma
-            v = rowb[k] - mb
-            num += u * v
-            da += u * u
-            db += v * v
-    d = math.sqrt(da * db)
-    return num / d if d > 0 else 0.0
+    return (cross - sa * sb / n) / math.sqrt(va * vb)
+
+
+def stereo_tiles(buf, w, ax, bx, y0, y1, ew, eh):
+    """Best correlation of each textured tile of one eye with the other eye.
+
+    The eyes of a stereo pair are not the same picture: everything is shifted
+    sideways by its parallax, and a performer close to a 180 camera is shifted
+    by several per cent of the eye width while the room behind barely moves.
+    Correlating the halves pixel for pixel therefore reads close-ups as mono.
+    Instead each tile of the first eye (at ax, y0) is matched against the
+    second eye (at bx, y1) over horizontal shifts of up to STEREO_SHIFT of the
+    eye width, and the best match counts. Parallax is horizontal in both
+    layouts, so top/bottom pairs are searched sideways too. Tiles without
+    texture (black borders, a fade) match anything and are left out.
+    """
+    t = STEREO_TILE
+    maxs = max(1, int(round(STEREO_SHIFT * ew)))
+    min_var = STEREO_TILE_MIN_STD ** 2 * t * t
+    out = []
+    for ty in range(0, eh - t + 1, t):
+        for tx in range(0, ew - t + 1, t):
+            a = _window(buf, w, ax + tx, y0 + ty, t, t)
+            if a[2] - a[1] * a[1] / (t * t) < min_var:
+                continue
+            lo, hi = max(-maxs, -tx), min(maxs, ew - t - tx)
+            memo = {}
+
+            def at(s):
+                if s not in memo:
+                    memo[s] = _wcorr(a, _window(buf, w, bx + tx + s, y1 + ty, t, t))
+                return memo[s]
+            # coarse pass every other pixel, then the neighbours of the best
+            best = max(range(lo, hi + 1, 2), key=at)
+            best = max((s for s in (best - 1, best, best + 1) if lo <= s <= hi), key=at)
+            out.append(at(best))
+    return out
+
+
+def wrap_ratio(buf, w, y0, h):
+    """How well the right edge of a picture continues into its left edge.
+
+    In a 360 equirect the last column and the first are neighbours on the
+    sphere, so they differ about as little as any two adjacent columns. In
+    anything else (one eye of a 180 pair, the outer edges of a side-by-side
+    frame, flat video) they are unrelated. Returns the mean difference across
+    the seam divided by the typical difference between columns half the
+    picture apart: near 0 for a 360, near 1 for unrelated edges. None when the
+    edges carry no texture (black or uniform edges match trivially).
+    """
+    def col(x):
+        return [buf[(y0 + y) * w + x] for y in range(h)]
+
+    def diff(a, b):
+        return sum(abs(p - q) for p, q in zip(a, b)) / len(a)
+
+    def std(c):
+        m = sum(c) / len(c)
+        return math.sqrt(sum((p - m) ** 2 for p in c) / len(c))
+
+    first, last = col(0), col(w - 1)
+    if min(std(first), std(last)) < WRAP_MIN_STD:
+        return None
+    step = max(1, w // 32)
+    far = sorted(diff(col(x), col((x + w // 2) % w)) for x in range(0, w, step))
+    far = _percentile(far, 0.5)
+    if far < WRAP_MIN_FAR:
+        return None
+    return diff(last, first) / far
 
 
 def _bimodal_lower(buf, w, h):
@@ -422,8 +499,10 @@ def frame_metrics(rgb, tw, th, wide, grey=None):
         # silhouettes in would widen the content box and cost the disc its shape
         buf = blank_corners(buf, tw, eyes)
     hw, hh = tw // 2, th // 2
-    lr = _corr(buf, tw, th, 0, 0, hw, 0, hw, th)
-    tb = _corr(buf, tw, th, 0, 0, 0, hh, tw, hh)
+    lr_tiles = stereo_tiles(buf, tw, 0, hw, 0, 0, hw, th)
+    if len(lr_tiles) < MIN_TEXTURED * (hw // STEREO_TILE) * (th // STEREO_TILE):
+        return None
+    tb_tiles = stereo_tiles(buf, tw, 0, 0, 0, hh, tw, hh)
     # measure the projection on the presumed left eye of wide frames
     if wide:
         ew, eh = hw, th
@@ -436,7 +515,13 @@ def frame_metrics(rgb, tw, th, wide, grey=None):
     m = _eye_metrics(eye, ew, eh)
     if not m:
         return None
-    m.update({"lr": lr, "tb": tb, "alpha_lower": _bimodal_lower(buf, tw, th),
+    m.update({"lr_tiles": lr_tiles, "tb_tiles": tb_tiles,
+              "lr": _percentile(sorted(lr_tiles), 0.5),
+              "tb": _percentile(sorted(tb_tiles), 0.5),
+              # a 360 mono frame wraps as a whole, each eye of a 360 TB one
+              "wrap": wrap_ratio(buf, tw, 0, th),
+              "wrap_tb": wrap_ratio(buf, tw, 0, hh),
+              "alpha_lower": _bimodal_lower(buf, tw, th),
               "matte_red": matte["red"], "matte_black": matte["black"],
               "matte": has_matte})
     return m
@@ -448,10 +533,19 @@ def combine_frames(frames):
     if not frames:
         return None
     out = {}
-    for k in ("lr", "tb", "blk_out", "blk_in", "bbox", "alpha_lower",
-              "matte_red", "matte_black"):
+    for k in ("blk_out", "blk_in", "bbox", "alpha_lower", "matte_red", "matte_black"):
         vals = sorted(f[k] for f in frames)
         out[k] = round(_percentile(vals, 0.5), 4)
+    for k in ("lr", "tb"):
+        # the textured tiles of all frames are pooled, so a fade or a title
+        # card (no textured tiles) does not drag a stereo pair down
+        tiles = [t for f in frames for t in f.get(k + "_tiles", ())]
+        vals = sorted(tiles) if tiles else sorted(f[k] for f in frames)
+        out[k] = round(_percentile(vals, 0.5), 4)
+    for k in ("wrap", "wrap_tb"):
+        # every frame that can tell must show the seam continuing
+        vals = [f[k] for f in frames if f.get(k) is not None]
+        out[k] = round(max(vals), 4) if vals else None
     out["matte"] = len(frames) >= 2 and all(f["matte"] for f in frames)
     # a frame can miss the matte (a fade, a dark cut); when the filename
     # already says passthrough/alpha, one matching frame is enough
@@ -517,16 +611,21 @@ def eye_aspect(w, h, stereo):
 
 def screen_from_eye(a):
     """One eye's shape names the projection: 180 covers a square, 360 a 2:1
-    equirect, 16:9 (and 16:10) is ordinary flat video. A full side-by-side
-    flat 3D file (3840x1080, 7680x2160) is two 16:9 eyes, so its whole-frame
-    aspect of 3.2-3.7 reads as FLAT once the SBS split is accepted."""
+    equirect, 16:9 (and 16:10, and DCI 4K's 1.9) is ordinary flat video. A
+    full side-by-side flat 3D file (3840x1080, 7680x2160) is two 16:9 eyes, so
+    its whole-frame aspect of 3.2-3.8 reads as FLAT once the SBS split is
+    accepted. A 2:1 shape alone does not make a 360: see classify()."""
     if abs(a - 1.0) < 0.28:
         return DOME
-    if 1.6 <= a < 1.87:
+    if 1.6 <= a < 1.92:
         return FLAT
-    if abs(a - 2.0) < 0.13:
+    if 1.92 <= a < 2.13:
         return SPHERE
     return None
+
+
+def wraps(ratio):
+    return ratio is not None and ratio <= WRAP_MAX
 
 
 def classify(w, h, res):
@@ -535,22 +634,50 @@ def classify(w, h, res):
     if not res:
         return None, None, "no probe"
     why = []
-    # stereo: accept a layout only if it implies a plausible eye shape
-    if res["lr"] >= 0.55 and screen_from_eye(eye_aspect(w, h, SBS)):
+    wrap, wrap_tb = res.get("wrap"), res.get("wrap_tb")
+    tb_eye = eye_aspect(w, h, TB)
+    # a 2:1 frame holding a top/bottom 360 pair squeezes each eye to 4:1
+    # (early 360 releases); only the seam of each eye can vouch for that
+    squeezed_tb = abs(tb_eye - 4.0) < 0.26 and wraps(wrap_tb)
+    # stereo: accept a layout only if it implies a plausible eye shape; when
+    # both qualify, the better match wins (a 360 TB frame's halves also match
+    # side by side somewhat: the room runs level all the way round)
+    sbs_ok = res["lr"] >= SBS_MIN and screen_from_eye(eye_aspect(w, h, SBS))
+    tb_ok = res["tb"] >= TB_MIN and (screen_from_eye(tb_eye) or squeezed_tb)
+    if sbs_ok and not (tb_ok and res["tb"] > res["lr"]):
         stereo = SBS
         why.append(f"lr={res['lr']:.2f}")
-    elif res["tb"] >= 0.60 and screen_from_eye(eye_aspect(w, h, TB)):
+    elif tb_ok:
         if res.get("alpha_lower", 0.0) > ALPHA_BIMODAL:
             # lower half is a binary matte, not an eye: packed alpha, not stereo
             return None, None, f"packed alpha? lower half {res['alpha_lower']:.2f} binary"
         stereo = TB
         why.append(f"tb={res['tb']:.2f}")
+        if squeezed_tb:
+            why.append(f"squeezed 360 TB, wrap={wrap_tb:.2f}")
+            return SPHERE, TB, ", ".join(why)
     else:
         stereo = MONO
         why.append(f"lr={res['lr']:.2f} tb={res['tb']:.2f}")
 
     ea = eye_aspect(w, h, stereo)
     by_shape = screen_from_eye(ea)
+    if stereo == MONO and by_shape == SPHERE:
+        # A mono 2:1 frame is a 360 only if its seam closes. Without that the
+        # likelier reading is a 180 pair whose halves match poorly (a close-up
+        # with a lot of parallax); halves with nothing in common at all are
+        # neither, most often flat video in a 2:1 frame.
+        wtxt = "none" if wrap is None else f"{wrap:.2f}"
+        if wraps(wrap):
+            why.append(f"360 wrap={wtxt}")
+        elif res["lr"] >= STEREO_NONE:
+            stereo = SBS
+            ea = eye_aspect(w, h, SBS)
+            by_shape = screen_from_eye(ea)
+            why.append(f"no 360 seam (wrap={wtxt}), read as a 180 pair")
+        else:
+            why.append(f"2:1 but neither stereo nor 360 (wrap={wtxt})")
+            return None, None, ", ".join(why)
     if (by_shape != FLAT and FISH_BBOX_LO <= res["bbox"] <= FISH_BBOX_HI
             and res["blk_out"] >= FISH_BLKOUT):
         screen = FISHEYE

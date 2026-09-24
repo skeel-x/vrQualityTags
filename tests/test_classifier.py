@@ -25,8 +25,94 @@ class Classifier(unittest.TestCase):
         self.assertEqual((screen, stereo), (v.DOME, v.SBS), why)
 
     def test_mono_360(self):
-        screen, stereo, why = self.classify(synth.mono(256, 128), 256, 128)
+        # a 2:1 mono frame is only a 360 when its seam closes
+        screen, stereo, why = self.classify(synth.panorama(), 256, 128)
         self.assertEqual((screen, stereo), (v.SPHERE, v.MONO), why)
+        self.assertIn("360 wrap", why)
+
+    def test_shifted_stereo_pair_is_sbs(self):
+        rgb = synth.shifted_sbs()
+        res = measure(rgb, 256, 128)
+        # pixel for pixel the halves hardly match; with the parallax searched
+        # every tile finds its partner
+        grey = v.rgb_to_grey(rgb)
+        aligned = v._wcorr(v._window(grey, 256, 0, 0, 128, 128),
+                           v._window(grey, 256, 128, 0, 128, 128))
+        self.assertLess(aligned, v.SBS_MIN)
+        self.assertGreater(res["lr"], 0.95)
+        screen, stereo, why = v.classify(8192, 4096, res)
+        self.assertEqual((screen, stereo), (v.DOME, v.SBS), why)
+
+    def test_parallax_beyond_the_search_is_not_matched(self):
+        ew = 128
+        big = int(round(v.STEREO_SHIFT * ew)) + 8
+        res = measure(synth.shifted_sbs(near=big, far=big), 256, 128)
+        self.assertLess(res["lr"], v.SBS_MIN)
+
+    def test_mono_2to1_without_seam_is_not_sphere(self):
+        # unrelated halves and no seam: neither a 180 pair nor a 360
+        screen, stereo, why = self.classify(synth.mono(256, 128), 256, 128)
+        self.assertNotEqual(screen, v.SPHERE, why)
+        self.assertEqual((screen, stereo), (None, None), why)
+        self.assertIn("neither stereo nor 360", why)
+
+    def test_2to1_default_is_a_180_pair(self):
+        base = {"lr": 0.45, "tb": 0.1, "blk_out": 0.1, "blk_in": 0.0, "bbox": 1.0,
+                "alpha_lower": 0.0, "matte": False, "wrap": 1.1, "wrap_tb": 1.5}
+        screen, stereo, why = v.classify(7168, 3584, base)
+        self.assertEqual((screen, stereo), (v.DOME, v.SBS), why)
+        self.assertIn("no 360 seam", why)
+        # edges without texture prove nothing either way
+        screen, stereo, _ = v.classify(7168, 3584, dict(base, wrap=None))
+        self.assertEqual((screen, stereo), (v.DOME, v.SBS))
+        # a closing seam makes it a 360
+        screen, stereo, _ = v.classify(7168, 3584, dict(base, wrap=0.1))
+        self.assertEqual((screen, stereo), (v.SPHERE, v.MONO))
+        self.assertEqual(v.classify(7168, 3584, dict(base, lr=0.1))[:2], (None, None))
+
+    def test_squeezed_360_top_bottom(self):
+        # 2:1 frame, two 4:1 eyes stacked: early 360 releases
+        res = {"lr": 0.69, "tb": 0.95, "blk_out": 0.1, "blk_in": 0.0, "bbox": 1.1,
+               "alpha_lower": 0.0, "matte": False, "wrap": 0.17, "wrap_tb": 0.13}
+        screen, stereo, why = v.classify(4096, 2048, res)
+        self.assertEqual((screen, stereo), (v.SPHERE, v.TB), why)
+        # without a closing seam a 4:1 eye is not plausible: the SBS reading stands
+        self.assertEqual(v.classify(4096, 2048, dict(res, wrap_tb=0.9))[:2], (v.DOME, v.SBS))
+
+    def test_better_layout_wins(self):
+        res = {"lr": 0.62, "tb": 0.9, "blk_out": 0.1, "blk_in": 0.0, "bbox": 1.0,
+               "alpha_lower": 0.0, "matte": False, "wrap": 0.1, "wrap_tb": 0.1}
+        self.assertEqual(v.classify(4096, 2048, res)[:2], (v.SPHERE, v.TB))
+        self.assertEqual(v.classify(4096, 2048, dict(res, lr=0.95))[:2], (v.DOME, v.SBS))
+
+    def test_wrap_ratio(self):
+        pano = v.rgb_to_grey(synth.panorama())
+        self.assertLess(v.wrap_ratio(pano, 256, 0, 128), v.WRAP_MAX)
+        noise = v.rgb_to_grey(synth.mono(256, 128))
+        self.assertGreater(v.wrap_ratio(noise, 256, 0, 128), 0.6)
+        # black edges (a 180 frame's vignette, a fisheye's corners) match trivially
+        framed = v.rgb_to_grey(synth.frame(
+            256, 128, lambda x, y: synth.grey(0 if x < 4 or x > 251 else synth.blocky(x, y))))
+        self.assertIsNone(v.wrap_ratio(framed, 256, 0, 128))
+        flat = bytes([90]) * (256 * 128)
+        self.assertIsNone(v.wrap_ratio(flat, 256, 0, 128))
+
+    def test_title_card_frame_is_skipped(self):
+        # black but for a caption: not a frame to measure
+        def px(x, y):
+            return synth.grey(synth.blocky(x, y) if 96 <= x < 160 and y < 32 else 0)
+        self.assertIsNone(v.frame_metrics(synth.frame(256, 128, px), 256, 128, True))
+
+    def test_stereo_tiles_are_pooled_over_frames(self):
+        a = {"lr": 0.9, "tb": 0.1, "blk_out": 0.1, "blk_in": 0.0, "bbox": 1.0,
+             "alpha_lower": 0.0, "matte_red": 0.0, "matte_black": 0.0, "matte": False,
+             "lr_tiles": [0.9] * 12, "tb_tiles": [0.1] * 12, "wrap": 1.2, "wrap_tb": None}
+        b = dict(a, lr=0.1, lr_tiles=[0.1] * 4, wrap=0.1)
+        res = v.combine_frames([a, b])
+        self.assertEqual(res["lr"], 0.9)
+        # every frame that can tell must close the seam
+        self.assertEqual(res["wrap"], 1.2)
+        self.assertIsNone(res["wrap_tb"])
 
     def test_top_bottom_360(self):
         screen, stereo, why = self.classify(synth.tb(), 256, 256)
@@ -104,6 +190,8 @@ class Classifier(unittest.TestCase):
         self.assertEqual(v.screen_from_eye(16 / 9), v.FLAT)
         self.assertEqual(v.screen_from_eye(2.0), v.SPHERE)
         self.assertIsNone(v.screen_from_eye(4.0))
+        # DCI 4K (4096x2160) is flat video, not a 360
+        self.assertEqual(v.screen_from_eye(4096 / 2160), v.FLAT)
 
 
 class Resolve(unittest.TestCase):

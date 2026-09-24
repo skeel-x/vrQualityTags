@@ -81,3 +81,28 @@ def packed_alpha_tb(w=256, h=256, seed=5):
             return grey(v)
         return grey(255 if v > 130 else 0)
     return frame(w, h, px)
+
+
+def shifted_sbs(w=256, h=128, near=7, far=5, seed=7):
+    """A 180 pair with parallax: the right eye sees the lower half of the
+    picture (the performer, close) shifted `near` px left and the upper half
+    (the room) `far` px, so the halves do not line up pixel for pixel."""
+    ew = w // 2
+
+    def px(x, y):
+        if x < ew:
+            return grey(blocky(x, y, seed))
+        shift = near if y >= h // 2 else far
+        return grey(blocky(x - ew + shift, y, seed))
+    return frame(w, h, px)
+
+
+def panorama(w=256, h=128, seed=8):
+    """A mono 360 equirect: blocky texture that repeats every `w` pixels with
+    the seam in the middle of a block, so the last column continues into the
+    first."""
+    blocks = w // 8
+
+    def px(x, y):
+        return grey(noise(((x + 4) // 8) % blocks, y // 8, seed))
+    return frame(w, h, px)

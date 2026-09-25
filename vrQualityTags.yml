@@ -1,6 +1,6 @@
 name: VR Quality Tags
 description: Companion to stash-vr. Measures each VR file and tags its projection, fisheye lens, stereo layout, eye order and passthrough alpha matte, plus a measured quality tier and Low Detail for files without the detail of their resolution, using the file's own metadata and (optionally) SexLikeReal's scene data where the picture agrees with them. Flat 3D files are recognised by name.
-version: 2.3.0
+version: 2.4.0
 url: https://github.com/skeel-x/vrQualityTags
 
 settings:

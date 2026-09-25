@@ -1,0 +1,30 @@
+{
+  "data": {
+    "id": 1005,
+    "viewAngle": 360,
+    "projection": 0,
+    "screenType": 0,
+    "stereomode": "ab2l",
+    "is3d": true,
+    "isFlatScreenType": false,
+    "projectionParams": {
+      "format": 1,
+      "viewAngle": 360,
+      "projection": 0
+    },
+    "categories": [
+      {
+        "id": 13,
+        "name": "fishnet"
+      },
+      {
+        "id": 20,
+        "name": "3D"
+      },
+      {
+        "id": 22,
+        "name": "360°"
+      }
+    ]
+  }
+}

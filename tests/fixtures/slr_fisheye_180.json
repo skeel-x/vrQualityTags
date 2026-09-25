@@ -1,0 +1,55 @@
+{
+  "data": {
+    "id": 1006,
+    "viewAngle": 180,
+    "projection": 4,
+    "screenType": 0,
+    "stereomode": "sbs2l",
+    "is3d": true,
+    "isFlatScreenType": false,
+    "projectionParams": {
+      "format": 2,
+      "viewAngle": 180,
+      "projection": 1
+    },
+    "categories": [
+      {
+        "id": 1,
+        "name": "3D"
+      },
+      {
+        "id": 7,
+        "name": "Fisheye"
+      },
+      {
+        "id": 8,
+        "name": "180°"
+      },
+      {
+        "id": 15,
+        "name": "Passthrough AI"
+      },
+      {
+        "id": 16,
+        "name": "Passthrough"
+      }
+    ],
+    "passthrough": {
+      "chromaKey": {
+        "enabled": false,
+        "hue": 0,
+        "saturation": 0,
+        "value": 0,
+        "opacity": 1,
+        "threshold": 0
+      },
+      "alpha": {
+        "enabled": false
+      },
+      "aiAlpha": {
+        "enabled": true,
+        "version": "1.0.0"
+      }
+    }
+  }
+}

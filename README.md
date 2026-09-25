@@ -10,8 +10,9 @@ Most VR files carry no usable metadata: spherical metadata is rare (and often
 wrong where it exists), filenames rarely say anything, and the container
 aspect cannot tell a 180 SBS file from a 360 mono one or from a fisheye. So the
 plugin decodes two frames per scene and measures the picture, with the file's
-own metadata (where the picture agrees with it), filename markers and the SLR
-FOV watermark taking precedence where they exist.
+own metadata and SexLikeReal's scene data (both only where the picture agrees
+with them), filename markers and the SLR FOV watermark taking precedence where
+they exist.
 
 ## Requirements
 
@@ -59,6 +60,7 @@ effect in the headset. Tags outside this table are never added or removed.
 | flat 2D video | `FLAT` |
 | flat stereoscopic 3D | `FLAT` + `SBS` / `FLAT` + `TB` |
 | corner-packed alpha matte (passthrough) | `Alpha` |
+| chroma-key (green screen) passthrough, from the SLR lookup | `Chroma Key` |
 | quality | `8K` / `7K` / `6K HBR`, each with the parent `HQ` |
 | probed, not recognised | `VRP: Unresolved` |
 | your opt-out | `VRP: Skip`: add it to a scene and the plugin never touches that scene |
@@ -77,7 +79,11 @@ is fixed, because stash-vr matches it by name.
 
 ## How it decides
 
-In order of authority:
+In order of authority: file metadata (where the frame agrees) > SLR lookup
+(where the frame agrees) > filename markers > SLR FOV watermark > frame
+measurement. Each source only speaks for what it knows; a question it leaves
+open goes to the next one. One exception: the corner alpha matte measured in
+the pixels always gives `Alpha`, whatever the other sources say.
 
 1. **File metadata**, read with one `ffprobe` call per scene before any frame
    is decoded (first video stream, side data and tags):
@@ -113,7 +119,47 @@ In order of authority:
 
    What survives beats every other source; what was dropped is named in the
    log line ("metadata ... (not trusted: ...)").
-2. **Filename markers** (case-insensitive).
+2. **SexLikeReal scene lookup** (setting `slrLookup`, off by default). For a
+   scene whose Stash URLs include a sexlikereal.com scene
+   (`https://www.sexlikereal.com/scenes/<title>-<id>`, the `trans/` and
+   `gay/` variants, or `https://www.sexlikereal.com/<id>`), the plugin asks
+   `https://api.sexlikereal.com/v3/scenes/<id>` (headers `Client-Type: web`
+   and `project`, as XBVR's scraper does; a scene the main project does not
+   know is asked again on project 0) and reads:
+   * `projectionParams.projection` (0 equirect, 1 fisheye), else the
+     top-level `projection` (0 equirect, 4 fisheye), else a `Fisheye`
+     category;
+   * `viewAngle`: 360 is `SPHERE`, 180 `DOME` (or a 180 fisheye, which gets
+     no lens tag); for a fisheye `projectionParams.cameraLens` (`mkx200`,
+     `mkx220`, `vrca220`, `rf52`) names the lens, else a `viewAngle` of 190 /
+     200 / 220 -> `RF52` / `MKX200` / `MKX220`;
+   * `stereomode`: `sbs2l` -> `SBS`, `sbs2r` -> `SBS` + `RL`, `ab2l` -> `TB`,
+     `mono` -> mono (else `projectionParams.format`: 1 `TB`, 2 `SBS`);
+   * `passthrough.alpha.enabled` (the category `Passthrough (Native)`) ->
+     `Alpha`, `passthrough.chromaKey.enabled` -> `Chroma Key`.
+     `passthrough.aiAlpha` is not used: it is SLR's AI mask, streamed
+     separately to SLR's own player and enabled on nearly every scene,
+     equirect 180 ones included; the downloaded file carries no matte for it.
+
+   SLR describes the scene, not necessarily the file you have: a download can
+   be an equirect conversion of a fisheye scene, and some scenes SLR lists as
+   equirect 180 look like a fisheye to the disc test. So SLR's projection
+   has to agree with the frame in coarse shape (fisheye or equirect) and fit
+   the eye the layout leaves, like file metadata; when it does not, the whole
+   answer is set aside, the pixels are kept, and the log says so. Where it
+   agrees, SLR decides 180 vs 360, the lens and passthrough, and the
+   watermark OCR is skipped. The pixel-measured corner matte still stands
+   when SLR says the scene has no alpha.
+
+   Politeness: at most one request per second, a User-Agent naming the
+   plugin, a 20 s timeout. Answers are cached in `vrQualityTags.slr.json` in
+   the plugin directory, keyed by SLR scene id with the fetch time, and
+   fetched again after 90 days; a scene SLR does not know (404) is asked
+   again after 30 days. Network errors, server errors and rate limiting are
+   not cached and fall back silently to the other sources (an expired
+   answer is still used then); after a 429, or three failures in a row, no
+   more requests are made in that run.
+3. **Filename markers** (case-insensitive).
    * VR layout, as a whole underscore-delimited segment so that title words do
      not count: `_LR_` `_SBS_` -> `SBS`, `_TB_` `_OU_` -> `TB`,
      `_RL_` -> `RL` + `SBS`, `_MONO_` `_2D_` -> mono, `_180` or `180x180` ->
@@ -136,19 +182,20 @@ In order of authority:
    * `Passthrough`, `Pass-Through`, `Alpha`, `alphapacked` only make a scene an
      `Alpha` candidate; the pixels decide.
    * Markers that contradict each other cancel out.
-3. **SLR FOV watermark.** SLR burns `SLR 190/200/220° FOV FISHEYE` into the
+4. **SLR FOV watermark.** SLR burns `SLR 190/200/220° FOV FISHEYE` into the
    top of the frame, centred across the dead space between the eyes (older
    releases: near the top of the left eye); both places are read. Nothing measurable separates those lenses, so where the text is
    readable it is the only authority. Up to eight frames are read with
    tesseract and two must agree. The OCR is skipped when it cannot help:
-   * the file metadata or the filename already names the lens;
-   * the scene does not end up `FISHEYE` (metadata and a filename screen
-     marker such as `_180` beat the pixels, so `x_LR_180.mp4` is never read even when the
+   * the file metadata, the SLR lookup or the filename already settles the
+     lens;
+   * the scene does not end up `FISHEYE` (metadata, the SLR lookup and a
+     filename screen marker such as `_180` beat the pixels, so `x_LR_180.mp4` is never read even when the
      pixels say fisheye);
    * the scene has the corner alpha matte and neither its file name nor its
      path mentions `SLR` or `SexLikeReal`: SLR's own passthrough releases carry
      the watermark, other studios' passthrough scenes never do.
-4. **Frame measurement.** Two frames (40% and 60% into the file, nearest keyframe) are decoded to
+5. **Frame measurement.** Two frames (40% and 60% into the file, nearest keyframe) are decoded to
    a 256 px thumbnail:
    * *stereo*: how well the two halves match (side by side, and top and
      bottom), searched for parallax; see [Stereo and 360](#stereo-and-360). A
@@ -246,6 +293,10 @@ circle,
 are blacked out before the projection is measured, and a square-eye stereo
 file with a matte is treated as a fisheye.
 
+The SLR lookup can add `Alpha` for a scene SLR marks as native alpha
+passthrough (for instance one whose sampled frames missed the matte), but it
+never removes a measured one.
+
 The filename is deliberately not trusted for this: many passthrough files are
 not named as such, and a file named "Passthrough" can be an ordinary 180 scene.
 
@@ -330,6 +381,7 @@ scene whose tags are already right is not written to.
 | Setting | Default | Meaning |
 |---|---|---|
 | Path filter | `/VR/` | only scenes whose file path contains this are measured. An empty value means the default; `/` matches every scene (then ordinary 2D videos get `FLAT`). |
+| Look up SexLikeReal scenes | off | ask SLR's API about scenes with a sexlikereal.com scene URL (see "How it decides") |
 | Read SLR FOV watermark | on | OCR the watermark to pick `RF52`/`MKX200`/`MKX220` (skipped where it cannot help, see "How it decides") |
 | Re-measure already-tagged scenes | off | measure scenes that already have a projection tag on every run and hook |
 | Minimum width (px) | 1920 | narrower files are not measured |

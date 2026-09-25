@@ -3,3 +3,5 @@ __pycache__/
 _site/
 vrQualityTags.state.json
 vrQualityTags.state.json.tmp
+vrQualityTags.slr.json
+vrQualityTags.slr.json.tmp

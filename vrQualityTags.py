@@ -13,11 +13,18 @@ WHERE THE ANSWER COMES FROM, IN ORDER OF AUTHORITY
              studio, 2D on a stereo pair), so each part only counts where the
              frame agrees with it: see vet_claim().
 
+  SLR        with the slrLookup setting, SexLikeReal's scene API for scenes
+             that carry a sexlikereal.com URL: 180 or 360, the fisheye lens,
+             stereo, and passthrough (native alpha, chroma key). Cached for
+             90 days. Its projection must agree with the frame in coarse
+             shape (a download can be an equirect conversion of a fisheye
+             scene), otherwise the answer is set aside. See SlrLookup.
+
   filename   explicit markers (_LR_, _TB_, _RL_, MKX200, RF52, F180, ...). Most files
              carry none, but when present they are deliberate and beat any
              measurement.
 
-  watermark  SLR burns "SLR 190/200/220 FOV" into the top of the left eye.
+  watermark  SLR burns "SLR 190/200/220 FOV" into the top of the frame.
              Nothing measurable separates 190 from 200 from 220, so where the
              text exists it is the only authority. Two agreeing frames are
              required; a single OCR hit is not trusted. Not read where it
@@ -37,6 +44,9 @@ WHERE THE ANSWER COMES FROM, IN ORDER OF AUTHORITY
                         as solid saturated red shapes; see corner_matte().
                lower    a near-binary lower half is a packed matte, not a
                         second eye (guard against RGB-over-alpha read as TB).
+
+The pixel-measured corner matte (Alpha) always stands, whatever the sources
+above say.
 
 The quality tier is measured from the file itself: width decides it, and in
 the 6K band the bitrate has to agree too, because that is where upscales hide.
@@ -58,7 +68,10 @@ import re
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
+
+VERSION = "2.2.0"
 
 DEFAULTS = {
     "pathFilter": "/VR/",
@@ -85,10 +98,13 @@ DEFAULTS = {
     # optional Stash API key; the session Stash hands a task expires after an
     # hour, which ends long runs part way
     "apiKey": "",
+    # ask SexLikeReal's API about scenes that carry a sexlikereal.com URL
+    "slrLookup": False,
 }
 
 NUMERIC = ("min8kWidth", "min7kWidth", "min6kWidth", "min6kBitrateMbit", "minWidth")
-BOOLEAN = ("readFovWatermark", "overwrite", "measureVrShapedOutside", "flat3dFilenameScan")
+BOOLEAN = ("readFovWatermark", "overwrite", "measureVrShapedOutside", "flat3dFilenameScan",
+           "slrLookup")
 
 # ---------------------------------------------------------------- vocabulary
 # Mirrors stash-vr's default video rules (internal/config/settings.go).
@@ -96,13 +112,14 @@ DOME, SPHERE, FISHEYE, FLAT = "DOME", "SPHERE", "FISHEYE", "FLAT"
 RF52, MKX200, MKX220, VRCA220 = "RF52", "MKX200", "MKX220", "VRCA220"
 SBS, TB, MONO, RL = "SBS", "TB", "MONO", "RL"
 ALPHA = "Alpha"
+CHROMA = "Chroma Key"                # green-screen passthrough, from the SLR lookup
 UNRESOLVED = "VRP: Unresolved"      # probed but not classifiable; stops endless re-probing
 SKIP = "VRP: Skip"                  # user-applied opt-out; never written or removed here
 
 SCREEN_TAGS = (DOME, SPHERE, FISHEYE, FLAT)
 LENS_TAGS = (RF52, MKX200, MKX220, VRCA220)
 STEREO_TAGS = (SBS, TB, MONO)
-PROJECTION_TAGS = SCREEN_TAGS + LENS_TAGS + STEREO_TAGS + (RL, ALPHA, UNRESOLVED)
+PROJECTION_TAGS = SCREEN_TAGS + LENS_TAGS + STEREO_TAGS + (RL, ALPHA, CHROMA, UNRESOLVED)
 
 # A scene carrying any of these has been classified before (by this plugin or
 # by hand) and is not re-measured unless asked to.
@@ -883,15 +900,17 @@ def _lens_of(fov):
     return VRCA220 if (vrca and value == "220") else FOV_LENS.get(value)
 
 
-def decide(fn, screen_px, stereo_px, fov=None, meta=None):
+def decide(fn, screen_px, stereo_px, fov=None, meta=None, slr=None):
     """(screen, lens, stereo, rl) from every source, in order of authority:
-    file metadata (vetted, see vet_claim()), filename markers, the watermark
-    FOV, the pixels. A source that names a lens names a fisheye."""
+    file metadata and the SLR lookup (both vetted, see vet_claim()), filename
+    markers, the watermark FOV, the pixels. A source that names a lens names
+    a fisheye; one that settles the lens (the SLR lookup of a 180 fisheye
+    names none) settles it for every source below."""
     fn_claim = {"screen": FISHEYE if fn["lens"] else fn["screen"],
                 "stereo": fn["stereo"], "rl": fn["rl"]}
     if fn["lens"]:
         fn_claim["lens"] = fn["lens"]
-    claims = [c for c in (meta, fn_claim) if c]
+    claims = [c for c in (meta, slr, fn_claim) if c]
     screen = next((c["screen"] for c in claims if c.get("screen")), None) or screen_px
     lens = None
     if screen == FISHEYE:
@@ -906,14 +925,18 @@ def decide(fn, screen_px, stereo_px, fov=None, meta=None):
     return screen, lens, stereo, rl
 
 
-def resolve(fn, screen_px, stereo_px, alpha_px, fov=None, meta=None):
-    """Merge file metadata, filename markers, the watermark FOV and the pixel
-    verdict into the projection tags a scene should carry. fov is
-    ("190"|"200"|"220", vrca); meta a vetted claim from vet_claim()."""
-    screen, lens, stereo, rl = decide(fn, screen_px, stereo_px, fov, meta)
+def resolve(fn, screen_px, stereo_px, alpha_px, fov=None, meta=None, slr=None):
+    """Merge file metadata, the SLR lookup, filename markers, the watermark
+    FOV and the pixel verdict into the projection tags a scene should carry.
+    fov is ("190"|"200"|"220", vrca); meta and slr are vetted claims from
+    vet_claim(). The pixel-measured matte (alpha_px) always stands; the SLR
+    lookup can add Alpha and Chroma Key but never remove the matte."""
+    screen, lens, stereo, rl = decide(fn, screen_px, stereo_px, fov, meta, slr)
     want = set()
-    if alpha_px:
+    if alpha_px or (slr and slr.get("alpha")):
         want.add(ALPHA)
+    if slr and slr.get("chroma"):
+        want.add(CHROMA)
     if not screen:
         want.add(UNRESOLVED)
         return want
@@ -955,21 +978,23 @@ FOV_CROPS = (
 _SLR_RE = re.compile(r"(?<![a-z0-9])(slr|sexlikereal)", re.IGNORECASE)
 
 
-def fov_skip_reason(fn, screen_px, alpha, path, meta=None):
+def fov_skip_reason(fn, screen_px, alpha, path, meta=None, slr=None):
     """Why reading the SLR watermark cannot help this scene, or None when it can.
 
     The watermark only names a fisheye lens, so there is nothing to read when
-    a better source (file metadata, the filename) already names the lens or
-    the scene does not end up FISHEYE (metadata and filename markers beat the
-    pixels). SLR's own passthrough releases carry the watermark, other
+    a better source (file metadata, the SLR lookup, the filename) already
+    settles the lens or the scene does not end up FISHEYE (those sources beat
+    the pixels). SLR's own passthrough releases carry the watermark, other
     studios' corner-matte scenes never do, so a matte scene is only read when
     its path mentions SLR / SexLikeReal.
     """
     if meta and meta.get("lens"):
         return "lens from metadata"
+    if slr and "lens" in slr:
+        return "lens from SLR"
     if fn["lens"]:
         return "lens from filename"
-    screen, _, _, _ = decide(fn, screen_px, None, None, meta)
+    screen, _, _, _ = decide(fn, screen_px, None, None, meta, slr)
     if screen != FISHEYE:
         return "not fisheye"
     if alpha and not _SLR_RE.search(path or ""):
@@ -1009,6 +1034,244 @@ def read_fov(cfg, path, duration):
         if os.path.exists(tmp):
             os.remove(tmp)
     return None
+
+
+# ------------------------------------------------------------ SLR lookup
+
+SLR_API = "https://api.sexlikereal.com/v3/scenes/"
+SLR_USER_AGENT = (f"vrQualityTags/{VERSION} (Stash plugin; "
+                  "+https://github.com/skeel-x/vrQualityTags)")
+SLR_CACHE_FILE = "vrQualityTags.slr.json"
+SLR_TTL = 90 * 86400                # a scene's answer is fetched again after this
+SLR_MISS_TTL = 30 * 86400           # and "no such scene" after this
+SLR_INTERVAL = 1.0                  # at most one request per second
+SLR_TIMEOUT = 20
+SLR_MAX_FAILURES = 3                # network failures in a row that end lookups for the run
+
+# https://www.sexlikereal.com/scenes/<slug>-<id>, .../trans/scenes/..., or the
+# short https://www.sexlikereal.com/<id>
+_SLR_URL = re.compile(r"^https?://(?:www\.)?sexlikereal\.com/"
+                      r"(?:(trans|gay)/)?(?:scenes/(?:[^/?#]*-)?)?(\d+)/?(?:[?#].*)?$",
+                      re.IGNORECASE)
+_SLR_PROJECT = {None: "1", "trans": "3", "gay": "4"}
+_SLR_LENS = {"mkx200": MKX200, "mkx220": MKX220, "vrca220": VRCA220, "rf52": RF52,
+             "fisheye190": RF52}
+_SLR_ANGLE_LENS = {190: RF52, 200: MKX200, 220: MKX220}
+_SLR_STEREO = {"sbs2l": (SBS, False), "sbs2r": (SBS, True), "ab2l": (TB, False),
+               "ab2r": (TB, False), "mono": (MONO, False)}
+_SLR_FORMAT = {1: TB, 2: SBS}
+
+
+def slr_scene_ref(urls):
+    """(scene id, project header) of the first SexLikeReal scene URL, or None."""
+    for u in urls or ():
+        m = _SLR_URL.match((u or "").strip())
+        if m:
+            return m.group(2), _SLR_PROJECT[(m.group(1) or "").lower() or None]
+    return None
+
+
+def _category_names(data):
+    out = []
+    for c in data.get("categories") or ():
+        name = c.get("name") if isinstance(c, dict) else c
+        if isinstance(name, str):
+            out.append(name.strip())
+    return out
+
+
+def _slr_relevant(name):
+    n = name.lower()
+    return "°" in n or "fisheye" in n or "passthrough" in n or "chroma" in n
+
+
+def slim_slr(data):
+    """The fields of an SLR API scene this plugin reads, and nothing else (no
+    title, performers or URLs), as kept in the cache."""
+    pt = data.get("passthrough")
+    out = {"id": data.get("id"), "viewAngle": data.get("viewAngle"),
+           "projection": data.get("projection"), "stereomode": data.get("stereomode"),
+           "categories": [n for n in _category_names(data) if _slr_relevant(n)]}
+    pp = data.get("projectionParams")
+    if isinstance(pp, dict):
+        out["projectionParams"] = {k: pp[k] for k in ("format", "viewAngle", "projection",
+                                                      "cameraLens") if k in pp}
+    if isinstance(pt, dict):
+        out["passthrough"] = {k: {"enabled": bool((pt.get(k) or {}).get("enabled"))}
+                              for k in ("alpha", "aiAlpha", "chromaKey") if isinstance(pt.get(k), dict)}
+    return out
+
+
+def _int(v):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def slr_claim(data):
+    """What an SLR API scene says, in this plugin's vocabulary: screen, lens
+    (always present for a fisheye: SLR settles it, None for a 180 fisheye),
+    stereo, rl, alpha, chroma and raw (a summary for the log). None when the
+    answer says nothing usable.
+
+    Projection: projectionParams.projection (0 equirect, 1 fisheye), else the
+    top-level projection (0 equirect, 4 fisheye), else a "Fisheye" category.
+    viewAngle 360 is a 360 equirect, otherwise a 180. The lens comes from
+    projectionParams.cameraLens, else from viewAngle 190 / 200 / 220.
+    Stereo from stereomode (sbs2l, sbs2r, ab2l, mono), else from
+    projectionParams.format (1 top/bottom, 2 side by side).
+    Passthrough: alpha.enabled (SLR's category "Passthrough (Native)") is the
+    alpha matte packed into the file. aiAlpha is SLR's AI mask, streamed
+    separately by SLR's own player and enabled on almost every scene, 180
+    ones included; the downloaded file carries no matte for it, so it is
+    ignored. chromaKey.enabled is green-screen passthrough.
+    """
+    if not isinstance(data, dict):
+        return None
+    pp = data.get("projectionParams") if isinstance(data.get("projectionParams"), dict) else {}
+    cats = {n.lower() for n in _category_names(data)}
+    angle = _int(pp.get("viewAngle")) or _int(data.get("viewAngle"))
+    kind = _int(pp.get("projection"))
+    if kind in (0, 1):
+        fisheye = kind == 1
+    else:
+        top = _int(data.get("projection"))
+        fisheye = top == 4 if top in (0, 4) else ("fisheye" in cats or None)
+    out, raw = {}, []
+    if angle:
+        raw.append(f"viewAngle {angle}")
+    if fisheye:
+        out["screen"] = FISHEYE
+        lens_name = str(pp.get("cameraLens") or "").lower()
+        out["lens"] = _SLR_LENS.get(lens_name) or _SLR_ANGLE_LENS.get(angle)
+        raw.append("fisheye" + (f" {lens_name}" if lens_name else ""))
+    elif fisheye is False or angle:
+        is360 = angle == 360 or (not angle and "360°" in cats)
+        out["screen"] = SPHERE if is360 else DOME
+        raw.append("equirect")
+    mode = str(data.get("stereomode") or "").lower()
+    if mode in _SLR_STEREO:
+        out["stereo"], out["rl"] = _SLR_STEREO[mode]
+        raw.append(mode)
+    elif _int(pp.get("format")) in _SLR_FORMAT:
+        out["stereo"], out["rl"] = _SLR_FORMAT[_int(pp["format"])], False
+        raw.append(f"format {pp['format']}")
+    pt = data.get("passthrough")
+    if isinstance(pt, dict):
+        out["alpha"] = bool((pt.get("alpha") or {}).get("enabled"))
+        out["chroma"] = bool((pt.get("chromaKey") or {}).get("enabled"))
+    else:
+        out["alpha"] = "passthrough (native)" in cats
+        out["chroma"] = any("chroma" in c for c in cats)
+    raw += [n for n, on in (("alpha", out["alpha"]), ("chroma key", out["chroma"])) if on]
+    if not (out.get("screen") or out.get("stereo") or out["alpha"] or out["chroma"]):
+        return None
+    out["raw"] = ", ".join(raw)
+    return out
+
+
+class SlrLookup:
+    """SexLikeReal's scene API, politely: one request per second at most, a
+    descriptive User-Agent, a timeout, and a JSON cache next to the plugin
+    (vrQualityTags.slr.json, keyed by SLR scene id) so a scene is fetched
+    again only after SLR_TTL, and a scene SLR does not know after
+    SLR_MISS_TTL. Every failure falls back silently to the other sources:
+    network errors and server errors are not cached; after SLR_MAX_FAILURES
+    of them in a row, or a 429, no more requests are made in this run.
+    """
+
+    def __init__(self, path, clock=time.time, sleep=time.sleep, opener=None):
+        self.path = path
+        self.clock = clock
+        self.sleep = sleep
+        self.opener = opener or urllib.request.urlopen
+        self.next_at = 0.0
+        self.failures = 0
+        self.stopped = None
+        self.cache = self._load()
+
+    def _load(self):
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _save(self):
+        tmp = self.path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self.cache, f, sort_keys=True)
+            os.replace(tmp, self.path)
+        except OSError as e:
+            log("w", f"cannot save the SLR cache to {self.path}: {e}")
+
+    def _fresh(self, entry):
+        if not isinstance(entry, dict) or not isinstance(entry.get("fetched"), (int, float)):
+            return False
+        ttl = SLR_TTL if entry.get("scene") else SLR_MISS_TTL
+        return 0 <= self.clock() - entry["fetched"] < ttl
+
+    def _get(self, sid, project):
+        """(status, parsed JSON or None); status None on a network failure."""
+        wait = self.next_at - self.clock()
+        if wait > 0:
+            self.sleep(wait)
+        req = urllib.request.Request(SLR_API + sid, headers={
+            "User-Agent": SLR_USER_AGENT, "Client-Type": "web", "project": project,
+            "Accept": "application/json"})
+        try:
+            with self.opener(req, timeout=SLR_TIMEOUT) as r:
+                status, body = r.status, r.read()
+        except urllib.error.HTTPError as e:
+            status, body = e.code, b""
+            e.close()
+        except (urllib.error.URLError, OSError, ValueError):
+            status, body = None, b""
+        finally:
+            self.next_at = self.clock() + SLR_INTERVAL
+        try:
+            return status, json.loads(body) if body else None
+        except ValueError:
+            return (None if status == 200 else status), None
+
+    def scene(self, ref):
+        """The slimmed SLR scene for (id, project), or None when SLR does not
+        know it or cannot be asked right now (stale cached data is used then)."""
+        sid, project = ref
+        entry = self.cache.get(sid)
+        if self._fresh(entry):
+            return entry.get("scene")
+        stale = entry.get("scene") if isinstance(entry, dict) else None
+        if self.stopped:
+            return stale
+        status, body = self._get(sid, project)
+        if status == 404 and project == "1":
+            # scenes outside the main project answer on project 0 (as XBVR does)
+            status, body = self._get(sid, "0")
+        if status == 200 and isinstance(body, dict) and isinstance(body.get("data"), dict):
+            scene = slim_slr(body["data"])
+        elif status in (200, 404):
+            scene = None                                # SLR does not know it
+        else:
+            self.failures += 1
+            if status == 429:
+                self.stopped = "rate limited (429)"
+            elif self.failures >= SLR_MAX_FAILURES:
+                self.stopped = f"{self.failures} failed requests in a row"
+            if self.stopped:
+                log("w", f"SLR lookup stopped for this run: {self.stopped}")
+            return stale
+        self.failures = 0
+        self.cache[sid] = {"fetched": self.clock(), "scene": scene}
+        self._save()
+        return scene
+
+
+def slr_cache_path(conn):
+    return os.path.join(os.path.dirname(state_path(conn)), SLR_CACHE_FILE)
 
 
 # ------------------------------------------------------------------ quality
@@ -1132,7 +1395,7 @@ TAG_BY_NAME = """query($n:String!){findTags(tag_filter:{name:{value:$n,modifier:
   filter:{per_page:2}){tags{id name parents{id}}}}"""
 TAG_CREATE = "mutation($i:TagCreateInput!){tagCreate(input:$i){id name}}"
 TAG_UPDATE = "mutation($i:TagUpdateInput!){tagUpdate(input:$i){id}}"
-SCENE_FIELDS = "id tags{id name} files{width height duration bit_rate size path}"
+SCENE_FIELDS = "id urls tags{id name} files{width height duration bit_rate size path}"
 SCENE_PAGE = """query($p:Int!,$f:String!){findScenes(
   scene_filter:{path:{value:$f,modifier:INCLUDES}},
   filter:{per_page:100,page:$p,sort:"id",direction:ASC}){
@@ -1191,6 +1454,29 @@ def ensure_tags(stash, cfg):
     return {n: t["id"] for n, t in found.items()}
 
 
+def lookup_slr(cfg, scene, w, h, res, screen_px, stereo_px):
+    """(vetted SLR claim or None, text for the log line). SLR's projection has
+    to agree with the frame in coarse shape (and fit the eye); when it does
+    not, the whole answer is set aside and the pixels are kept."""
+    lookup = cfg.get("_slr")
+    ref = slr_scene_ref(scene.get("urls")) if lookup else None
+    if not ref:
+        return None, ""
+    claim = slr_claim(lookup.scene(ref))
+    if not claim:
+        return None, ""
+    vetted, dropped = vet_claim(claim, w, h, res, screen_px, stereo_px)
+    why = f", SLR {ref[0]} {claim['raw']}"
+    if claim.get("screen") and "screen" not in vetted:
+        log("i", f"scene {scene.get('id')}: SLR {ref[0]} says {claim['raw']}, which the frame "
+                 f"contradicts ({'; '.join(dropped)}); kept the pixels")
+        return None, why + " (contradicts the frame, not used)"
+    vetted["alpha"], vetted["chroma"] = claim["alpha"], claim["chroma"]
+    if dropped:
+        why += " (not trusted: " + "; ".join(dropped) + ")"
+    return vetted, why
+
+
 def measure_projection(cfg, scene):
     """(wanted projection tag names, reason) or (None, reason) when the scene
     cannot be measured and its projection tags must be left alone."""
@@ -1224,9 +1510,12 @@ def measure_projection(cfg, scene):
         why += f", metadata {meta_claim['raw']}"
         if dropped:
             why += " (not trusted: " + "; ".join(dropped) + ")"
+    slr, slr_why = lookup_slr(cfg, scene, w, h, res, screen, stereo)
+    why += slr_why
 
     fov = None
-    skip = fov_skip_reason(fn, screen, alpha, path, meta) if cfg["readFovWatermark"] else "off"
+    skip = (fov_skip_reason(fn, screen, alpha, path, meta, slr)
+            if cfg["readFovWatermark"] else "off")
     if skip is None:
         fov = read_fov(cfg, path, dur)
         if fov:
@@ -1236,7 +1525,7 @@ def measure_projection(cfg, scene):
     marks = [k for k in ("stereo", "screen", "lens") if fn[k]] + (["rl"] if fn["rl"] else [])
     if marks:
         why += ", filename " + "+".join(str(fn[k]) if k != "rl" else "RL" for k in marks)
-    return resolve(fn, screen, stereo, alpha, fov, meta), why
+    return resolve(fn, screen, stereo, alpha, fov, meta, slr), why
 
 
 def process_scene(stash, cfg, scene, ids, mode):
@@ -1505,6 +1794,8 @@ def main():
     cfg = load_config(stored)
     if cfg.get("apiKey"):
         stash.use_api_key(cfg["apiKey"])
+    if cfg["slrLookup"]:
+        cfg["_slr"] = SlrLookup(slr_cache_path(payload.get("server_connection")))
     mode = args.get("mode") or "hook"
     if mode == "all":                   # task name of the pre-merge quality plugin
         mode = "untagged"

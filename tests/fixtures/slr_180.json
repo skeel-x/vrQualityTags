@@ -1,0 +1,51 @@
+{
+  "data": {
+    "id": 1004,
+    "viewAngle": 180,
+    "projection": 0,
+    "screenType": 0,
+    "stereomode": "sbs2l",
+    "is3d": true,
+    "isFlatScreenType": false,
+    "projectionParams": {
+      "format": 2,
+      "viewAngle": 180,
+      "projection": 0
+    },
+    "categories": [
+      {
+        "id": 1,
+        "name": "3D"
+      },
+      {
+        "id": 9,
+        "name": "180°"
+      },
+      {
+        "id": 18,
+        "name": "Passthrough AI"
+      },
+      {
+        "id": 19,
+        "name": "Passthrough"
+      }
+    ],
+    "passthrough": {
+      "chromaKey": {
+        "enabled": false,
+        "hue": 0,
+        "saturation": 0,
+        "value": 0,
+        "opacity": 1,
+        "threshold": 0
+      },
+      "alpha": {
+        "enabled": false
+      },
+      "aiAlpha": {
+        "enabled": true,
+        "version": "1.0.0"
+      }
+    }
+  }
+}

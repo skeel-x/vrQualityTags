@@ -12,6 +12,10 @@ settings:
     displayName: Read SLR FOV watermark
     description: For fisheye files, OCR the burned-in "SLR 190/200/220 FOV" text to pick RF52, MKX200 or MKX220. Needs tesseract. Falls back to plain FISHEYE. Skipped when the filename names the lens, and for passthrough (corner matte) scenes whose name and path do not mention SLR or SexLikeReal.
     type: BOOLEAN
+  slrLookup:
+    displayName: Look up SexLikeReal scenes
+    description: For scenes with a sexlikereal.com scene URL, ask SLR's API for 180 vs 360, the fisheye lens, the stereo layout and passthrough (Alpha, Chroma Key). One request per second at most, answers cached for 90 days in vrQualityTags.slr.json next to the plugin. SLR's answer is only used where it agrees with the frame in coarse shape (fisheye or equirect); it then replaces the watermark OCR. Default off.
+    type: BOOLEAN
   overwrite:
     displayName: Re-measure already-tagged scenes
     description: Normally a scene that already has a projection tag keeps it and only its quality tag is updated. Turn on to re-measure and replace on every run and hook.

@@ -733,3 +733,12 @@ class StrayMono(unittest.TestCase):
         lib = self.small_library()
         self.run_main(lib, "clear")
         self.assertEqual(self.tags(lib, "2"), {"MONO"})
+
+
+class Version(unittest.TestCase):
+    def test_yml_and_user_agent_agree(self):
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(here, "vrQualityTags.yml"), encoding="utf-8") as f:
+            yml = f.read()
+        self.assertIn(f"\nversion: {v.VERSION}\n", yml)
+        self.assertIn(v.VERSION, v.SLR_USER_AGENT)

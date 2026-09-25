@@ -419,8 +419,12 @@ assigned tags would otherwise never see it.
   compilation) is classified by those two frames.
 * A mono 360 whose halves happen to match (0.55 or more) is read as a 180
   pair; the seam is only consulted when no stereo layout is accepted.
-* The FOV of a fisheye cannot be measured. Without a filename marker or a
-  readable SLR watermark it stays plain `FISHEYE`.
+* The FOV of a fisheye cannot be measured. Without file metadata, an SLR
+  lookup, a filename marker or a readable SLR watermark it stays plain
+  `FISHEYE`.
+* The SLR lookup describes the scene on SLR, not your file. Its lens is
+  trusted as given; in a sample of a few dozen scenes one SLR `viewAngle`
+  (190) disagreed with the watermark burned into the file (200).
 * Flat 3D outside the path filter is recognised by name only. A title word such
   as "3D" in an ordinary 2D video's name is read as side by side; add
   `VRP: Skip` to such a scene.

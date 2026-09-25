@@ -1,5 +1,6 @@
 """Honest resolution: the detail measure and the Low Detail tag."""
 import cmath
+import concurrent.futures
 import math
 import os
 import unittest
@@ -422,3 +423,52 @@ class DetailTask(unittest.TestCase):
                 mock.patch.object(v, "log"):
             v.run_all(FakeStash(), cfg(), IDS, "detail")
         self.assertEqual([c[0][2]["id"] for c in pd.call_args_list], ["1"])
+
+
+class Crunch(unittest.TestCase):
+    def tearDown(self):
+        v.stop_cpu_pool()
+
+    def crop(self):
+        return bytes((x * 7 + y * 13 + (x * y) % 11) % 256 for y in range(512) for x in range(512))
+
+    def test_inline_without_a_pool(self):
+        self.assertIsNone(v._CPU)
+        self.assertEqual(v.crunch(operator_add, 2, 3), 5)
+
+    def test_pool_gives_the_same_result(self):
+        c = self.crop()
+        v.start_cpu_pool(2)
+        self.assertIsNotNone(v._CPU)
+        self.assertEqual(v.crunch(v.detail_blocks, c, 512, 512), v.detail_blocks(c, 512, 512))
+        v.stop_cpu_pool()
+        self.assertIsNone(v._CPU)
+
+    def test_broken_pool_falls_back_once(self):
+        class Broken:
+            def submit(self, *a):
+                raise concurrent.futures.BrokenExecutor("killed")
+
+            def shutdown(self, **kw):
+                pass
+        v._CPU = Broken()
+        with mock.patch.object(v, "log") as log:
+            self.assertEqual(v.crunch(operator_add, 1, 1), 2)
+            self.assertIsNone(v._CPU)
+            self.assertEqual(v.crunch(operator_add, 1, 2), 3)
+        self.assertEqual(log.call_count, 1)
+
+    def test_run_all_starts_and_stops_the_pool_with_workers(self):
+        with mock.patch.object(v, "candidates", return_value=[]), \
+                mock.patch.object(v, "start_cpu_pool") as start, \
+                mock.patch.object(v, "stop_cpu_pool") as stop, mock.patch.object(v, "log"):
+            v.run_all(FakeStash(), cfg(workers=3), IDS, "detail")
+            start.assert_called_once_with(3)
+            stop.assert_called_once()
+            start.reset_mock()
+            v.run_all(FakeStash(), cfg(workers=1), IDS, "detail")
+            start.assert_not_called()
+
+
+def operator_add(a, b):
+    return a + b

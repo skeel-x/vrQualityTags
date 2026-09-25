@@ -70,6 +70,7 @@ import cmath
 import concurrent.futures
 import json
 import math
+import multiprocessing
 import operator
 import os
 import re
@@ -80,7 +81,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "2.5.0"
+VERSION = "2.6.0"
 
 DEFAULTS = {
     "pathFilter": "/VR/",
@@ -173,6 +174,52 @@ def log(level, msg):
     # lock keeps lines from worker threads whole
     with _LOG_LOCK:
         print(f"\x01{level}\x02{msg}", file=sys.stderr, flush=True)
+
+
+# The pure-Python arithmetic (the frame metrics and the detail spectra) runs
+# in this process pool while a task has one: worker threads only overlap the
+# ffmpeg decodes, since Python runs one thread's arithmetic at a time.
+_CPU = None
+_CPU_LOCK = threading.Lock()
+
+
+def start_cpu_pool(n):
+    """Give the task n processes for the arithmetic. "spawn" starts them
+    clean: forking a process that already runs threads is unsafe."""
+    global _CPU
+    try:
+        _CPU = concurrent.futures.ProcessPoolExecutor(
+            n, mp_context=multiprocessing.get_context("spawn"))
+    except (OSError, ValueError, NotImplementedError) as e:
+        log("w", f"no worker processes ({e}); the arithmetic runs in the threads")
+        _CPU = None
+
+
+def stop_cpu_pool():
+    global _CPU
+    pool, _CPU = _CPU, None
+    if pool is not None:
+        pool.shutdown(cancel_futures=True)
+
+
+def crunch(fn, *args):
+    """fn(*args) in the task's process pool, or here without one. A pool
+    that breaks (a worker killed, processes not allowed) is dropped once with
+    a warning and the rest of the run computes in the threads: the result is
+    the same either way."""
+    global _CPU
+    pool = _CPU
+    if pool is not None:
+        try:
+            return pool.submit(fn, *args).result()
+        except (concurrent.futures.BrokenExecutor, OSError, RuntimeError) as e:
+            with _CPU_LOCK:
+                if _CPU is pool:
+                    _CPU = None
+                    log("w", f"worker processes failed ({type(e).__name__}: {e}); "
+                             "the arithmetic runs in the threads from now on")
+            pool.shutdown(wait=False, cancel_futures=True)
+    return fn(*args)
 
 
 def temp_path(kind, ext):
@@ -702,8 +749,13 @@ def measure_detail(cfg, f):
         crop = grab_crop(cfg, path, (f.get("duration") or 600) * frac, box)
         if crop:
             read = True
-            blocks.append(detail_blocks(crop, box[2], box[3]))
+            blocks.append(crunch(detail_blocks, crop, box[2], box[3]))
     return {"verdict": detail_verdict(blocks, w)} if read else {}
+
+
+def yuv_metrics(yuv, n, tw, th, wide):
+    """frame_metrics() of one grabbed thumbnail (one crunch() call)."""
+    return frame_metrics(yuv_to_rgb(yuv, n), tw, th, wide, grey=yuv[:n])
 
 
 def probe(cfg, path, w, h, duration, detail=False):
@@ -720,12 +772,12 @@ def probe(cfg, path, w, h, duration, detail=False):
         if box:
             yuv, crop = grab_with_crop(cfg, path, ts, tw, th, box)
             if crop:
-                blocks.append(detail_blocks(crop, box[2], box[3]))
+                blocks.append(crunch(detail_blocks, crop, box[2], box[3]))
         else:
             yuv = grab(cfg, path, ts, tw, th)
         if yuv is None:
             continue
-        m = frame_metrics(yuv_to_rgb(yuv, n), tw, th, wide, grey=yuv[:n])
+        m = crunch(yuv_metrics, yuv, n, tw, th, wide)
         if m:
             frames.append(m)
     res = combine_frames(frames)
@@ -2100,8 +2152,8 @@ class RetagState:
 
 def run_all(stash, cfg, ids, mode, state=None):
     """One task run over every candidate scene, cfg["workers"] of them at a
-    time (the decodes run in ffmpeg, so threads overlap them; the pure-Python
-    arithmetic still takes turns). state (a RetagState) makes the run
+    time: threads overlap the ffmpeg decodes, and as many processes run the
+    arithmetic (see crunch()). state (a RetagState) makes the run
     resumable: scenes up to state.last_id are skipped, each completed scene
     is recorded, and the state is cleared once the run completes."""
     todo = candidates(stash, cfg)
@@ -2132,6 +2184,8 @@ def run_all(stash, cfg, ids, mode, state=None):
 
     workers = cfg.get("workers", 1)
     pool = concurrent.futures.ThreadPoolExecutor(workers) if workers > 1 else None
+    if pool:
+        start_cpu_pool(workers)
     # map() hands the results back in scene order, so the resume state only
     # ever records a scene once every scene before it is done too
     results = pool.map(one, rest) if pool else map(one, rest)
@@ -2147,6 +2201,7 @@ def run_all(stash, cfg, ids, mode, state=None):
     finally:
         if pool:
             pool.shutdown(cancel_futures=True)
+            stop_cpu_pool()
     if state is not None:
         state.clear()
     log("i", f"done ({mode}): {len(todo) - start} scenes examined, {changed} changed")

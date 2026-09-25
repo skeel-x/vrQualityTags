@@ -411,7 +411,7 @@ scene whose tags are already right is not written to.
 | Read SLR FOV watermark | on | OCR the watermark to pick `RF52`/`MKX200`/`MKX220` (skipped where it cannot help, see "How it decides") |
 | Re-measure already-tagged scenes | off | measure scenes that already have a projection tag on every run and hook |
 | Minimum width (px) | 1920 | narrower files are not measured |
-| Scenes measured at once | 4 | how many scenes a task measures in parallel (1 to 16). The frame decodes overlap, so 4 ran the detail task about 2.3 times faster than 1 on an 8K library on a network share (the pure-Python arithmetic still takes turns); each worker reads its own file from the media storage, so set 1 for a slow network share or a busy server. The scan hook always measures one scene. Resuming, the log and the progress stay in scene order. |
+| Scenes measured at once | 4 | how many scenes a task measures in parallel (1 to 16): as many threads overlap the frame decodes and as many worker processes run the arithmetic; each worker reads its own file from the media storage, so set 1 for a slow network share or a busy server. The scan hook always measures one scene. Resuming, the log and the progress stay in scene order. |
 | Measure VR-shaped files outside the path filter | on | measure a scene outside the path filter when its file is a 2:1 or square frame at least 3840 wide or has a VR marker in its name |
 | Tag flat 3D files outside the path filter | on | the flat 3D filename check |
 | ffmpeg path, ffprobe path, tesseract path | `/usr/bin/...` | |

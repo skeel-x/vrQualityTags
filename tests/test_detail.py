@@ -147,12 +147,21 @@ class BitrateFloor(unittest.TestCase):
         self.assertIsNone(v.bits_per_pixel({"width": 8192, "height": 4096, "bit_rate": 0}))
         self.assertIsNone(v.bits_per_pixel({}))
 
+    MIDDLING = {"ratio": 0.1, "eff": 5000, "blocks": 4}
+
     def test_floor_per_pixel(self):
         # 0.8 bit/px/s: 26.8 Mbit/s at 8192x4096, 23.6 at 7680x3840
-        self.assertTrue(v.low_detail(f8k(26), self.SHARP)[0])
-        self.assertFalse(v.low_detail(f8k(28), self.SHARP)[0])
-        self.assertTrue(v.low_detail(f8k(23, 7680, 3840), self.SHARP)[0])
-        self.assertFalse(v.low_detail(f8k(24, 7680, 3840), self.SHARP)[0])
+        self.assertTrue(v.low_detail(f8k(26), self.MIDDLING)[0])
+        self.assertFalse(v.low_detail(f8k(28), self.MIDDLING)[0])
+        self.assertTrue(v.low_detail(f8k(23, 7680, 3840), self.MIDDLING)[0])
+        self.assertFalse(v.low_detail(f8k(24, 7680, 3840), self.MIDDLING)[0])
+
+    def test_floor_spares_a_sharp_file(self):
+        # SLR Originals at 21.5 Mbit/s with a ratio of 0.18 keeps its detail
+        self.assertFalse(v.low_detail(f8k(21.5), {"ratio": 0.18, "eff": 6000, "blocks": 4})[0])
+        self.assertFalse(v.low_detail(f8k(20), self.SHARP)[0])
+        self.assertTrue(v.low_detail(f8k(20), {"ratio": 0.119, "eff": 5000, "blocks": 4})[0])
+        self.assertFalse(v.low_detail(f8k(20), {"ratio": 0.12, "eff": 5000, "blocks": 4})[0])
 
     def test_rule(self):
         low, why = v.low_detail(f8k(60), self.SOFT)
@@ -160,11 +169,11 @@ class BitrateFloor(unittest.TestCase):
         self.assertIn("detail 0.050", why)
         self.assertIn("effective width ~4000", why)
         self.assertFalse(v.low_detail(f8k(60), self.SHARP)[0])
-        # never tagged on unknown pixels, unless the bitrate alone qualifies
+        # never tagged on unknown pixels, whatever the bitrate
         low, why = v.low_detail(f8k(60), None)
         self.assertIsNone(low)
         self.assertIn("unknown", why)
-        self.assertTrue(v.low_detail(f8k(20), None)[0])
+        self.assertIsNone(v.low_detail(f8k(20), None)[0])
         self.assertIsNone(v.low_detail({"width": 8192, "height": 4096}, None)[0])
 
 
@@ -183,11 +192,11 @@ class LowDetailTags(unittest.TestCase):
         self.assertIn("unknown", why)
 
     def test_not_measured(self):
-        # nothing decoded: only the bitrate floor can add the tag
+        # nothing decoded: the tag is left alone, even at a low bitrate
         self.assertEqual(self.tags(detail={})[:2], (set(), set()))
         self.assertEqual(self.tags(detail=None)[:2], (set(), set()))
         starved = scene(files=[f8k(15)])
-        self.assertEqual(self.tags(starved, detail=None)[:2], ({v.LOW_DETAIL}, {v.LOW_DETAIL}))
+        self.assertEqual(self.tags(starved, detail=None)[:2], (set(), set()))
 
     def test_no_tier_or_off_removes(self):
         self.assertEqual(self.tags(tier=None)[:2], ({v.LOW_DETAIL}, set()))
@@ -228,12 +237,11 @@ class ProcessScene(unittest.TestCase):
         self.assertEqual(stash.writes, [])
         self.assertIsNone(out)
 
-    def test_settled_starved_scene_gets_it_from_the_bitrate(self):
+    def test_settled_starved_scene_is_not_tagged_unmeasured(self):
         sc = scene(files=[f8k(15)], tags=["DOME", "SBS", "8K", "HQ"])
         stash, _, seen = self.run_scene(sc)
         self.assertEqual(seen, [])
-        self.assertEqual(names(stash.writes[0]["tag_ids"]),
-                         {"DOME", "SBS", "8K", "HQ", v.LOW_DETAIL})
+        self.assertEqual(stash.writes, [])
 
     def test_no_tier_no_detail(self):
         sc = scene(files=[f8k(60, 3840, 1920)], tags=[v.LOW_DETAIL])

@@ -468,16 +468,19 @@ an FFT along its rows and columns (every other line), weighted as a gradient:
 **The rule.** `Low Detail` when the detail ratio is below **0.08**, or the
 bitrate is below **0.8 bit per pixel and second** (26.8 Mbit/s at 8192x4096,
 23.6 at 7680x3840, 20.7 at 7200x3600; a `6K HBR` file already needs 40 Mbit/s
-and is never that low). The bitrate floor catches files whose centre crop
-happens to look fine but whose motion and periphery are starved.
+and is never that low) *and* the ratio is below **0.12**. The bitrate floor
+only tips a middling file: one whose centre crop looks passable but whose
+motion and periphery are starved. A clearly sharp file keeps its detail
+whatever its bitrate, and the bitrate alone never tags a file whose pixels
+were not measured.
 
 **When it is applied.** The detail is measured whenever a scene is measured
 (a new scene, the untagged task, a retag) and has a tier tag, on the primary
 file when that is the file the tier was judged by. It adds about 0.7 s per
 scene of pure-Python arithmetic; the decode is shared with the projection
-measurement. A scene that is not measured only gets `Low Detail` from the
-bitrate floor, and keeps whatever the last measurement decided otherwise;
-run *Re-measure and retag all VR scenes* once to judge an existing library.
+measurement. A scene that is not measured keeps whatever the last
+measurement decided; run *Re-measure and retag all VR scenes* once to judge
+an existing library.
 A scene without a tier tag, and every scene when the setting is off, has the
 tag removed.
 
@@ -512,8 +515,10 @@ the file does not carry the detail its resolution claims. Remastered and old
 releases mostly pass: whatever made them 8K (a larger master than their age
 suggests, or an upscaler that sharpens or invents texture) left real energy
 near Nyquist. The threshold is set where the visibly soft files are; no file
-whose crops were seen to hold fine detail falls below it (one such file is
-tagged by the bitrate floor).
+whose crops were seen to hold fine detail falls below it. The counts in the
+table were taken before the floor became a tie-breaker: then it also tagged
+one clearly sharp file (an SLR Originals scene at 21.5 Mbit/s, ratio 0.18),
+which the 0.12 limit now spares.
 
 ## Limitations
 

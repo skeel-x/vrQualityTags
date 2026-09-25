@@ -74,7 +74,7 @@ settings:
     type: NUMBER
   detectLowDetail:
     displayName: Tag Low Detail
-    description: When a scene is measured and earns a quality tier, also judge whether the file carries the detail its resolution claims, from a native-resolution crop of the two measured frames (no extra decode). An upscale, or a bitrate below 0.8 bit per pixel and second (about 27 Mbit/s at 8192x4096), gets Low Detail next to its tier tag. Scenes that are not measured only get it from the bitrate. Default on; switched off, the tag is removed.
+    description: When a scene is measured and earns a quality tier, also judge whether the file carries the detail its resolution claims, from a native-resolution crop of the two measured frames (no extra decode). An upscale gets Low Detail next to its tier tag, and so does a middling file whose bitrate is below 0.8 bit per pixel and second (about 27 Mbit/s at 8192x4096). Scenes that are not measured keep what their last measurement decided. Default on; switched off, the tag is removed.
     type: BOOLEAN
 
 exec:

@@ -54,7 +54,8 @@ above say.
 The quality tier is measured from the file itself: width decides it, and in
 the 6K band the bitrate has to agree too, because that is where upscales hide.
 A file whose pixels lack the detail of their resolution (an upscale), or whose
-bitrate is too low to keep it, also gets Low Detail: see low_detail().
+bitrate is too low to keep what little they show, also gets Low Detail: see
+low_detail().
 
 Outside the VR path a file is measured only when Stash's metadata alone says it
 is VR (a 2:1 or square frame at least 3840 wide, or a VR marker in its name).
@@ -712,6 +713,9 @@ DETAIL_MIN_RATIO = 0.08     # below this share (in the sharpest frame) the
                             # file lacks the detail of its resolution
 LOW_DETAIL_BITS = 0.8       # bits per pixel and second: 26.8 Mbit/s at
                             # 8192x4096, 23.6 at 7680x3840, 20.7 at 7200x3600
+DETAIL_STARVED_RATIO = 0.12 # a bitrate below LOW_DETAIL_BITS only counts
+                            # when the ratio is below this too: a clearly
+                            # sharp file keeps its detail whatever its bitrate
 
 _FFT_PLANS = {}
 
@@ -852,10 +856,10 @@ def bits_per_pixel(f):
 
 def low_detail(f, detail):
     """(True/False/None, reason) for a file that earned a tier tag. True when
-    the pixels lack the detail (ratio below DETAIL_MIN_RATIO) or the bitrate
-    is below LOW_DETAIL_BITS; False when neither holds and the pixels were
-    measured; None when the bitrate is fine and the pixels are unknown (never
-    tagged on unknown)."""
+    the pixels lack the detail (ratio below DETAIL_MIN_RATIO), or the bitrate
+    is below LOW_DETAIL_BITS and the ratio below DETAIL_STARVED_RATIO; False
+    when neither holds and the pixels were measured; None when the pixels are
+    unknown (never tagged on unknown, whatever the bitrate)."""
     bpp = bits_per_pixel(f)
     why = []
     if detail:
@@ -865,11 +869,13 @@ def low_detail(f, detail):
         why.append("detail unknown")
     if bpp is not None:
         why.append(f"{bpp:.2f} bit/px/s")
-    starved = bpp is not None and bpp < LOW_DETAIL_BITS
-    soft = bool(detail) and detail["ratio"] < DETAIL_MIN_RATIO
-    if starved or soft:
+    if not detail:
+        return None, ", ".join(why)
+    starved = bpp is not None and bpp < LOW_DETAIL_BITS and \
+        detail["ratio"] < DETAIL_STARVED_RATIO
+    if starved or detail["ratio"] < DETAIL_MIN_RATIO:
         return True, ", ".join(why)
-    return (False if detail else None), ", ".join(why)
+    return False, ", ".join(why)
 
 
 # ------------------------------------------------------------- classification
@@ -1857,8 +1863,8 @@ def low_detail_tags(cfg, scene, tier, detail):
 
     Off (detectLowDetail false): removed. No tier tag: removed. Measured this
     pass (detail holds a verdict): the full rule, low_detail(). Not measured:
-    only the bitrate floor can add it (it qualifies whatever the pixels say);
-    otherwise the tag is left as the last measurement set it.
+    the tag is left as the last measurement set it (the bitrate alone never
+    decides, it only tips a middling ratio).
     """
     if not cfg["detectLowDetail"] or not tier:
         return {LOW_DETAIL}, set(), ""
@@ -1867,9 +1873,6 @@ def low_detail_tags(cfg, scene, tier, detail):
         low, why = low_detail(f, detail["verdict"])
         return {LOW_DETAIL}, ({LOW_DETAIL} if low else set()), f"low detail: {why}" if low \
             else why
-    bpp = bits_per_pixel(f)
-    if bpp is not None and bpp < LOW_DETAIL_BITS:
-        return {LOW_DETAIL}, {LOW_DETAIL}, f"low detail: {bpp:.2f} bit/px/s"
     return set(), set(), ""
 
 

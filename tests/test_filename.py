@@ -172,3 +172,59 @@ class TestLensAndStereoSpellings(unittest.TestCase):
 
     def test_contradicting_screen_words_leave_it_to_pixels(self):
         self.check("Title_fisheye_180.mp4", screen=None)
+
+
+class XbvrTokens(unittest.TestCase):
+    """File name tokens XBVR's scanner reads (pkg/tasks/volume.go)."""
+
+    def test_f180_is_a_fisheye_without_lens(self):
+        for name in ("Title_F180_LR.mp4", "Title [180F].mp4", "Title.f180.mp4",
+                     "Title 180f.mp4"):
+            with self.subTest(name=name):
+                got = fn(name)
+                self.assertEqual((got["screen"], got["lens"]), (v.FISHEYE, None))
+                self.assertTrue(got["vr_word"])
+
+    def test_f180_must_stand_alone(self):
+        for name in ("Title F1800.mp4", "Title 180fps.mp4", "Title_AF180_LR.mp4"):
+            with self.subTest(name=name):
+                self.assertNotEqual(fn(name)["screen"], v.FISHEYE)
+
+    def test_flat_segment(self):
+        for name in ("Title_FLAT.mp4", "Title_flat_8K.mp4", "flat_Title.mp4"):
+            with self.subTest(name=name):
+                self.assertEqual(fn(name)["screen"], v.FLAT)
+        # a title word is not a marker
+        for name in ("Flatmate [VR].mp4", "Title_Flatmate_LR.mp4", "Flat Out [VR].mp4",
+                     "Studio - Flat Share.mp4"):
+            with self.subTest(name=name):
+                self.assertIsNone(fn(name)["screen"])
+
+    def test_flat_and_180_cancel(self):
+        self.assertIsNone(fn("Title_FLAT_180.mp4")["screen"])
+
+    def test_mono_pairs(self):
+        for name, screen in (("Title_MONO_180.mp4", v.DOME), ("Title_180_MONO.mp4", v.DOME),
+                             ("Title mono_360.mp4", v.SPHERE), ("Title [360-mono].mp4", v.SPHERE),
+                             ("Title mono.180.mp4", v.DOME), ("Title 360_mono.mp4", v.SPHERE)):
+            with self.subTest(name=name):
+                got = fn(name)
+                self.assertEqual((got["screen"], got["stereo"]), (screen, v.MONO))
+
+    def test_mono_pair_needs_a_joining_separator(self):
+        for name in ("Title mono 180.mp4", "Title Monologue_180x.mp4", "Title mono1800.mp4"):
+            with self.subTest(name=name):
+                self.assertNotEqual(fn(name)["stereo"], v.MONO)
+
+    def test_flat_name_is_not_vr_shaped(self):
+        f = {"width": 1920, "height": 1080, "path": "/m/Title_FLAT.mp4"}
+        self.assertFalse(v.looks_vr({"files": [f]}))
+        f["path"] = "/m/Title_F180.mp4"
+        self.assertTrue(v.looks_vr({"files": [f]}))
+
+    def test_scan_regex_finds_the_new_tokens(self):
+        import re
+        rx = re.compile(v.VR_NAME_PATH_REGEX)
+        for path in ("/m/Title_F180.mp4", "/m/Title 180f.mp4", "/m/Title mono_360.mp4"):
+            with self.subTest(path=path):
+                self.assertTrue(rx.search(path))

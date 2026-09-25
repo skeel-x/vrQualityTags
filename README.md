@@ -81,7 +81,13 @@ In order of authority:
    * VR layout, as a whole underscore-delimited segment so that title words do
      not count: `_LR_` `_SBS_` -> `SBS`, `_TB_` `_OU_` -> `TB`,
      `_RL_` -> `RL` + `SBS`, `_MONO_` `_2D_` -> mono, `_180` or `180x180` ->
-     `DOME`, `_360` -> `SPHERE`. DeoVR's `3dh` / `3dv` words -> `SBS` / `TB`.
+     `DOME`, `_360` -> `SPHERE`, `_FLAT_` -> `FLAT`. DeoVR's `3dh` / `3dv`
+     words -> `SBS` / `TB`.
+   * XBVR's scanner conventions: `mono_180` / `180_mono` -> `DOME` + mono,
+     `mono_360` / `360_mono` -> `SPHERE` + mono (joined by `_`, `-` or `.`, not
+     a space); `F180` / `180F` as a word -> `FISHEYE` (a 180 degree fisheye,
+     lens left open). `flat` only counts as a whole underscore-delimited
+     segment, so "Flatmate" or "Flat Share" in a title is not a marker.
    * Lens, as any word: `FISHEYE190` `RF52` -> `RF52`, `FISHEYE200` `MKX200` ->
      `MKX200`, `FISHEYE220` `MKX220` -> `MKX220`, `VRCA220` (each implies
      `FISHEYE`). A separator before the number also works: `MKX-220`,

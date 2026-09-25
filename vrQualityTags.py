@@ -7,7 +7,7 @@ every tag written here has an effect in the headset.
 
 WHERE THE ANSWER COMES FROM, IN ORDER OF AUTHORITY
 
-  filename   explicit markers (_LR_, _TB_, _RL_, MKX200, RF52, ...). Most files
+  filename   explicit markers (_LR_, _TB_, _RL_, MKX200, RF52, F180, ...). Most files
              carry none, but when present they are deliberate and beat any
              measurement.
 
@@ -141,16 +141,21 @@ _180X180 = re.compile(r"(?<!\d)180x180(?!\d)")
 _AR_PHRASE = re.compile(r"pass[\s_-]?through|alpha[\s_-]?packed|packed[\s_-]?alpha")
 
 _SEG_STEREO = {"lr": SBS, "sbs": SBS, "tb": TB, "ou": TB, "mono": MONO, "2d": MONO}
+# XBVR's file scanner conventions: "mono_180" / "180_mono" (and 360), joined by
+# one separator but not by a space, which a title could hold
+_MONO_PAIR = re.compile(r"(?<![a-z0-9])(?:mono[_.-]?(180|360)|(180|360)[_.-]?mono)(?![a-z0-9])")
 # Flat (non-VR) stereoscopic 3D. The strong words only ever describe flat 3D,
 # so they count everywhere; the loose ones ("3D", "SBS", "OU") are only trusted
 # outside the VR path, where they cannot mean a VR layout.
 _FLAT3D_STRONG = {"hsbs": SBS, "fsbs": SBS, "lrf": SBS, "hou": TB, "tab": TB, "tbf": TB}
 _FLAT3D_PAIR = re.compile(r"(?<![a-z0-9])(?:half|full)[\s_.-]?(sbs|ou|tb)(?![a-z0-9])")
 _FLAT3D_LOOSE = {"sbs": SBS, "ou": TB}
-_VR_WORDS = {"vr", "vr180", "vr360", "180", "360", "180x180", "fisheye", "3dh", "3dv"}
+_VR_WORDS = {"vr", "vr180", "vr360", "180", "360", "180x180", "fisheye", "f180", "180f",
+             "3dh", "3dv"}
 # words that make a file outside the VR path worth measuring; a bare "180" or
 # "360" is too common in titles, the _180 / _360 segments count via "screen"
-_VR_NAME_WORDS = {"vr", "vr180", "vr360", "180x180", "fisheye", "fisheye180", "3dh", "3dv"}
+_VR_NAME_WORDS = {"vr", "vr180", "vr360", "180x180", "fisheye", "fisheye180", "f180", "180f",
+                  "3dh", "3dv"}
 _WORD_LENS = {"fisheye190": RF52, "rf52": RF52, "fisheye200": MKX200, "mkx200": MKX200,
               "mkx220": MKX220, "vrca220": VRCA220, "fisheye220": MKX220}
 # lens names written with a separator before the number: "MKX-220", "mkx 200",
@@ -186,10 +191,12 @@ def parse_filename(path):
     for seg in segments if len(segments) > 1 else ():
         if seg in _SEG_STEREO:
             stereo.add(_SEG_STEREO[seg])
+        if seg == "flat":
+            screen.add(FLAT)
         if seg == "rl":
             rl = True
             stereo.add(SBS)
-        if _SEG_180.match(seg):
+        if _SEG_180.match(seg) and seg != "180f":
             screen.add(DOME)
         if _SEG_360.match(seg):
             screen.add(SPHERE)
@@ -199,7 +206,11 @@ def parse_filename(path):
     for w, value in _WORD_STEREO.items():
         if w in words:
             stereo.add(value)
-    if "fisheye" in words or "fisheye180" in words:
+    for a, b in _MONO_PAIR.findall(base):
+        stereo.add(MONO)
+        screen.add(DOME if (a or b) == "180" else SPHERE)
+    # "f180" / "180f": a 180 degree fisheye, lens left open (XBVR's convention)
+    if words & {"fisheye", "fisheye180", "f180", "180f"}:
         screen.add(FISHEYE)
     lens_words = {w for w in words if w in _WORD_LENS}
     lens_words |= {a + b for a, b in _LENS_SPLIT.findall(base) if a + b in _WORD_LENS}
@@ -872,7 +883,7 @@ def looks_vr(scene):
     fn = parse_filename(f.get("path"))
     if fn["flat3d"]:
         return False
-    if fn["screen"] or fn["lens"] or fn["vr_word"]:
+    if fn["screen"] not in (None, FLAT) or fn["lens"] or fn["vr_word"]:
         return True
     w, h = f.get("width") or 0, f.get("height") or 0
     if w < VR_SHAPE_MIN_WIDTH or not h:
@@ -944,7 +955,7 @@ SCENE_PAGE_BIG = """query($p:Int!,$f:String!){findScenes(
                 path:{value:$f,modifier:EXCLUDES}},
   filter:{per_page:100,page:$p,sort:"id",direction:ASC}){
   count scenes{%s}}}""" % SCENE_FIELDS
-VR_NAME_PATH_REGEX = r"(?i)(^|[^a-z0-9])(vr|180|360|fisheye|3dh|3dv|mkx|vrca|rf)"
+VR_NAME_PATH_REGEX = r"(?i)(^|[^a-z0-9])(vr|180|360|f180|mono[_.-]?(180|360)|fisheye|3dh|3dv|mkx|vrca|rf)"
 SCENE_UPDATE = "mutation($i:SceneUpdateInput!){sceneUpdate(input:$i){id}}"
 # every scene carrying one tag, for the stray MONO tidy
 SCENE_PAGE_TAG = """query($p:Int!,$f:ID!){findScenes(

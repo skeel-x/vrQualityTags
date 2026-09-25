@@ -67,6 +67,7 @@ Pure standard library on purpose: the plugin interpreter has no numpy or PIL,
 and arithmetic over a 256px thumbnail does not need them.
 """
 import cmath
+import concurrent.futures
 import json
 import math
 import operator
@@ -74,11 +75,12 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
 
-VERSION = "2.4.1"
+VERSION = "2.5.0"
 
 DEFAULTS = {
     "pathFilter": "/VR/",
@@ -109,9 +111,12 @@ DEFAULTS = {
     "apiKey": "",
     # ask SexLikeReal's API about scenes that carry a sexlikereal.com URL
     "slrLookup": False,
+    # scenes measured at the same time by a task (the hook does one)
+    "workers": 4,
 }
 
 NUMERIC = ("min8kWidth", "min7kWidth", "min6kWidth", "min6kBitrateMbit", "minWidth")
+MAX_WORKERS = 16
 BOOLEAN = ("readFovWatermark", "overwrite", "measureVrShapedOutside", "flat3dFilenameScan",
            "slrLookup", "detectLowDetail")
 
@@ -160,9 +165,19 @@ MATTE_MIN_SHARE = 0.006     # red share of the corner pixels
 MATTE_MIN_CLEAN = 0.80      # black + red share: the corners hold nothing else
 
 
+_LOG_LOCK = threading.Lock()
+
+
 def log(level, msg):
-    # Stash reads plugin logs off stderr, one prefixed line at a time
-    print(f"\x01{level}\x02{msg}", file=sys.stderr, flush=True)
+    # Stash reads plugin logs off stderr, one prefixed line at a time; the
+    # lock keeps lines from worker threads whole
+    with _LOG_LOCK:
+        print(f"\x01{level}\x02{msg}", file=sys.stderr, flush=True)
+
+
+def temp_path(kind, ext):
+    """A /tmp file name private to this process and thread."""
+    return f"/tmp/vrq_{kind}_{os.getpid()}_{threading.get_ident()}.{ext}"
 
 
 # ------------------------------------------------------------------ filename
@@ -633,7 +648,7 @@ def grab_with_crop(cfg, path, ts, tw, th, box):
     serves both (the decode is the expensive part); the crop goes through a
     temporary file because two raw outputs cannot share stdout."""
     x, y, cw, ch = box
-    tmp = f"/tmp/vrq_crop_{os.getpid()}.raw"
+    tmp = temp_path("crop", "raw")
     graph = (f"[0:v]split=2[a][b];[a]scale={tw}:{th}:out_range=pc[t];"
              f"[b]crop={cw}:{ch}:{x}:{y}[c]")
     cmd = [cfg["ffmpegPath"], "-nostdin", "-v", "error", "-y", "-skip_frame", "nokey",
@@ -1296,7 +1311,7 @@ def read_fov(cfg, path, duration):
     """Read the burned-in SLR FOV. Requires two agreeing frames."""
     if not os.path.exists(cfg["tesseractPath"]):
         return None
-    tmp = f"/tmp/vrq_fov_{os.getpid()}.png"
+    tmp = temp_path("fov", "png")
     votes = {}
     try:
         for frac in (0.30, 0.50, 0.70, 0.20, 0.60, 0.80, 0.40, 0.90):
@@ -1486,6 +1501,8 @@ class SlrLookup:
         self.failures = 0
         self.stopped = None
         self.cache = self._load()
+        # worker threads share the rate limit, the cache and the failure count
+        self.lock = threading.Lock()
 
     def _load(self):
         try:
@@ -1535,7 +1552,12 @@ class SlrLookup:
 
     def scene(self, ref):
         """The slimmed SLR scene for (id, project), or None when SLR does not
-        know it or cannot be asked right now (stale cached data is used then)."""
+        know it or cannot be asked right now (stale cached data is used then).
+        One thread at a time: the others wait out the rate limit with it."""
+        with self.lock:
+            return self._scene(ref)
+
+    def _scene(self, ref):
         sid, project = ref
         entry = self.cache.get(sid)
         if self._fresh(entry):
@@ -1661,6 +1683,10 @@ def load_config(stored):
         cfg[k] = float(cfg[k])
     for k in BOOLEAN:
         cfg[k] = bool(cfg[k])
+    try:
+        cfg["workers"] = min(MAX_WORKERS, max(1, int(float(cfg["workers"]))))
+    except (TypeError, ValueError):
+        cfg["workers"] = DEFAULTS["workers"]
     return cfg
 
 
@@ -2073,8 +2099,10 @@ class RetagState:
 
 
 def run_all(stash, cfg, ids, mode, state=None):
-    """One task run over every candidate scene. state (a RetagState) makes the
-    run resumable: scenes up to state.last_id are skipped, each completed scene
+    """One task run over every candidate scene, cfg["workers"] of them at a
+    time (the decodes run in ffmpeg, so threads overlap them; the pure-Python
+    arithmetic still takes turns). state (a RetagState) makes the run
+    resumable: scenes up to state.last_id are skipped, each completed scene
     is recorded, and the state is cleared once the run completes."""
     todo = candidates(stash, cfg)
     if mode == "detail":
@@ -2092,19 +2120,33 @@ def run_all(stash, cfg, ids, mode, state=None):
                  f"already done by the run started "
                  f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(state.started))}")
     progress(start / len(todo) if todo else 1.0)
-    changed = 0
-    for n, (sc, handler, _) in enumerate(todo[start:], start + 1):
+    rest = todo[start:]
+
+    def one(item):
+        sc, handler, _ = item
         try:
-            r = handler(stash, cfg, sc, ids, mode)
+            return handler(stash, cfg, sc, ids, mode)
         except Exception as e:
             log("e", f"scene {sc['id']}: {type(e).__name__}: {e}")
-            r = None
-        if r:
-            changed += 1
-            log("i", f"scene {sc['id']}: {r}")
-        if state is not None:
-            state.done(sc["id"])
-        progress(n / len(todo))
+            return None
+
+    workers = cfg.get("workers", 1)
+    pool = concurrent.futures.ThreadPoolExecutor(workers) if workers > 1 else None
+    # map() hands the results back in scene order, so the resume state only
+    # ever records a scene once every scene before it is done too
+    results = pool.map(one, rest) if pool else map(one, rest)
+    changed = 0
+    try:
+        for n, ((sc, _, _), r) in enumerate(zip(rest, results), start + 1):
+            if r:
+                changed += 1
+                log("i", f"scene {sc['id']}: {r}")
+            if state is not None:
+                state.done(sc["id"])
+            progress(n / len(todo))
+    finally:
+        if pool:
+            pool.shutdown(cancel_futures=True)
     if state is not None:
         state.clear()
     log("i", f"done ({mode}): {len(todo) - start} scenes examined, {changed} changed")

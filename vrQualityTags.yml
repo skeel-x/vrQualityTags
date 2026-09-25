@@ -1,6 +1,6 @@
 name: VR Quality Tags
 description: Companion to stash-vr. Measures each VR file and tags its projection, fisheye lens, stereo layout, eye order and passthrough alpha matte, plus a measured quality tier and Low Detail for files without the detail of their resolution, using the file's own metadata and (optionally) SexLikeReal's scene data where the picture agrees with them. Flat 3D files are recognised by name.
-version: 2.4.1
+version: 2.5.0
 url: https://github.com/skeel-x/vrQualityTags
 
 settings:
@@ -23,6 +23,10 @@ settings:
   minWidth:
     displayName: Minimum width (px)
     description: Files narrower than this are not measured for projection.
+    type: NUMBER
+  workers:
+    displayName: Scenes measured at once
+    description: How many scenes a task measures at the same time (default 4, at most 16). More overlaps the frame decodes and runs faster, but reads that many files from the media storage at once; set 1 for a slow share or a busy server. The scan hook always does one scene.
     type: NUMBER
   measureVrShapedOutside:
     displayName: Measure VR-shaped files outside the path filter

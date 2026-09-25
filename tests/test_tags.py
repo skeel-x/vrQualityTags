@@ -517,7 +517,7 @@ class Resume(unittest.TestCase):
         return Library([scene(8192, sid=str(i), path=f"/media/VR/S/{i}.mp4")
                         for i in (3, 1, 12, 7, 20)])
 
-    def run_retag(self, lib, state, fail_on=None):
+    def run_retag(self, lib, state, fail_on=None, workers=1):
         seen, logs = [], []
 
         def measure(c, sc, detail=None):
@@ -529,7 +529,7 @@ class Resume(unittest.TestCase):
         with mock.patch.object(v, "measure_projection", side_effect=measure), \
                 mock.patch.object(v, "log", side_effect=lambda lv, m: logs.append((lv, m))):
             try:
-                v.run_all(lib, cfg(), IDS, "retag", state)
+                v.run_all(lib, cfg(workers=workers), IDS, "retag", state)
             except KeyboardInterrupt:
                 pass
         return seen, logs
@@ -571,6 +571,32 @@ class Resume(unittest.TestCase):
         self.assertIn(("p", "0.6000"), logs)
         self.assertFalse(os.path.exists(self.path))
 
+    def test_workers_keep_results_and_state_in_scene_order(self):
+        seen, logs = self.run_retag(self.library(), v.RetagState(self.path, 1000.0), workers=4)
+        self.assertEqual(sorted(seen, key=int), ["1", "3", "7", "12", "20"])
+        done = [m.split(":")[0] for lv, m in logs if lv == "i" and m.startswith("scene ")]
+        self.assertEqual(done, ["scene 1", "scene 3", "scene 7", "scene 12", "scene 20"])
+        prog = [m for lv, m in logs if lv == "p"]
+        self.assertEqual(prog, ["0.0000", "0.2000", "0.4000", "0.6000", "0.8000", "1.0000"])
+        self.assertFalse(os.path.exists(self.path))
+
+    def test_interrupted_workers_never_save_past_an_unfinished_scene(self):
+        now = time.time()
+        seen, _ = self.run_retag(self.library(), v.RetagState(self.path, now - 60),
+                                 fail_on="12", workers=4)
+        self.assertIn("12", seen)
+        # 20 may have been measured alongside 12, but the state stops before 12
+        self.assertEqual(self.saved(), {"started": now - 60, "last_id": 7})
+        seen, _ = self.run_retag(self.library(), v.RetagState.load(self.path), workers=4)
+        self.assertEqual(sorted(seen, key=int), ["12", "20"])
+
+    def test_workers_setting(self):
+        self.assertEqual(v.load_config({})["workers"], 4)
+        self.assertEqual(v.load_config({"workers": 0})["workers"], 1)
+        self.assertEqual(v.load_config({"workers": 2.0})["workers"], 2)
+        self.assertEqual(v.load_config({"workers": 99})["workers"], v.MAX_WORKERS)
+        self.assertEqual(v.load_config({"workers": "x"})["workers"], 4)
+
     def test_stale_or_broken_state_is_ignored(self):
         now = 10 * 86400.0
 
@@ -611,7 +637,7 @@ class Resume(unittest.TestCase):
                 mock.patch.object(v, "log"), mock.patch("builtins.print"), \
                 mock.patch("sys.stdin", io.StringIO(json.dumps(payload))):
             v.main()
-        return seen
+        return sorted(seen, key=int)          # workers measure in any order
 
     def test_retag_task_resumes_and_fresh_task_does_not(self):
         with open(self.path, "w") as f:

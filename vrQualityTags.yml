@@ -1,6 +1,6 @@
 name: VR Quality Tags
 description: Companion to stash-vr. Measures each VR file and tags its projection, fisheye lens, stereo layout, eye order and passthrough alpha matte, plus a measured quality tier and Low Detail for files without the detail of their resolution, using the file's own metadata and (optionally) SexLikeReal's scene data where the picture agrees with them. Flat 3D files are recognised by name.
-version: 2.4.0
+version: 2.4.1
 url: https://github.com/skeel-x/vrQualityTags
 
 settings:
@@ -88,6 +88,10 @@ tasks:
     description: Measure every matching scene that has no projection tag yet and tag it. Quality tags are refreshed on every scene. Outside the path filter, VR-shaped files are measured and flat 3D names are checked.
     defaultArgs:
       mode: untagged
+  - name: Measure the detail of all tiered scenes
+    description: Only judge whether each scene with a quality tier carries the detail of its resolution, and add or remove Low Detail. No other tag is touched and no projection, lens or SLR lookup is done, so it is much faster than a retag. Resumable like the retag (its own progress file).
+    defaultArgs:
+      mode: detail
   - name: Re-measure and retag all VR scenes
     description: Ignore existing tags, measure everything again and replace every tag this plugin manages. Resumable - an interrupted run (stopped, restarted, or ended by an expired session) continues after the last scene it finished when run again within 7 days.
     defaultArgs:

@@ -78,7 +78,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "2.4.0"
+VERSION = "2.4.1"
 
 DEFAULTS = {
     "pathFilter": "/VR/",
@@ -655,6 +655,40 @@ def grab_with_crop(cfg, path, ts, tw, th, box):
     if p.returncode != 0 or crop is None or len(crop) < cw * ch:
         crop = None
     return yuv, crop and crop[:cw * ch]
+
+
+def grab_crop(cfg, path, ts, box):
+    """Only the native-resolution grey crop (x, y, w, h) of one frame, or
+    None: what the detail task needs, without the analysis thumbnail."""
+    x, y, cw, ch = box
+    cmd = [cfg["ffmpegPath"], "-nostdin", "-v", "error", "-skip_frame", "nokey",
+           "-ss", f"{ts:.3f}", "-i", path, "-frames:v", "1",
+           "-vf", f"crop={cw}:{ch}:{x}:{y}", "-pix_fmt", "gray", "-f", "rawvideo", "-"]
+    try:
+        p = subprocess.run(cmd, capture_output=True, timeout=300)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if p.returncode != 0 or len(p.stdout) < cw * ch:
+        return None
+    return p.stdout[:cw * ch]
+
+
+def measure_detail(cfg, f):
+    """{"verdict": detail_verdict() or None} of a file from the same two
+    frames probe() uses, or {} when it cannot be read (nothing decoded)."""
+    w, h, path = f.get("width"), f.get("height"), f.get("path")
+    if not w or not h or not path or not os.path.exists(path):
+        return {}
+    box = detail_box(w, h)
+    if box is None:
+        return {"verdict": None}
+    blocks, read = [], False
+    for frac in (0.4, 0.6):
+        crop = grab_crop(cfg, path, (f.get("duration") or 600) * frac, box)
+        if crop:
+            read = True
+            blocks.append(detail_blocks(crop, box[2], box[3]))
+    return {"verdict": detail_verdict(blocks, w)} if read else {}
 
 
 def probe(cfg, path, w, h, duration, detail=False):
@@ -1876,6 +1910,31 @@ def low_detail_tags(cfg, scene, tier, detail):
     return set(), set(), ""
 
 
+def process_detail(stash, cfg, scene, ids, mode):
+    """The detail task: measure only the detail of a scene with a tier tag and
+    set or remove LOW_DETAIL; every other tag is left alone, and nothing but
+    the native crop of two frames is decoded. Returns a log line when it
+    changed."""
+    have_names = {t["name"] for t in scene.get("tags") or []}
+    if SKIP in have_names or LOW_DETAIL not in ids:
+        return None
+    tier = tier_of(scene, cfg)
+    f = tier_file(scene)
+    # measured on the primary file only when that is the file the tier was
+    # judged by, as in process_scene()
+    detail = measure_detail(cfg, f) if tier and f is (scene.get("files") or [None])[0] \
+        else {}
+    scope, want, why = low_detail_tags(cfg, scene, tier, detail)
+    if not scope:
+        return None
+    have = {t["id"] for t in scene.get("tags") or []}
+    new = diff_tags(have, {ids[LOW_DETAIL]}, {ids[n] for n in want})
+    if new is None:
+        return None
+    stash.call(SCENE_UPDATE, {"i": {"id": scene["id"], "tag_ids": sorted(new)}})
+    return f"{LOW_DETAIL} {'added' if want else 'removed'}  ({why or 'no tier'})"
+
+
 def process_flat_scene(stash, cfg, scene, ids, mode):
     """Flat 3D outside the VR path: filename only, nothing is decoded. A file
     without a flat 3D marker is not touched at all (no tag reads as flat 2D)."""
@@ -1942,6 +2001,7 @@ def candidates(stash, cfg):
 
 
 STATE_FILE = "vrQualityTags.state.json"
+DETAIL_STATE_FILE = "vrQualityTags.detail-state.json"
 RESUME_MAX_AGE = 7 * 86400          # an older unfinished retag starts over
 
 
@@ -1950,11 +2010,11 @@ def progress(fraction):
     log("p", f"{min(1.0, max(0.0, fraction)):.4f}")
 
 
-def state_path(conn):
+def state_path(conn, name=STATE_FILE):
     """The resume state lives next to the plugin: Stash passes its directory as
     server_connection.PluginDir."""
     d = (conn or {}).get("PluginDir") or os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(d, STATE_FILE)
+    return os.path.join(d, name)
 
 
 class RetagState:
@@ -2017,6 +2077,9 @@ def run_all(stash, cfg, ids, mode, state=None):
     run resumable: scenes up to state.last_id are skipped, each completed scene
     is recorded, and the state is cleared once the run completes."""
     todo = candidates(stash, cfg)
+    if mode == "detail":
+        # flat 3D files earn no tier; every measured scene gets the detail only
+        todo = [(sc, process_detail, kind) for sc, h, kind in todo if h is process_scene]
     kinds = {}
     for _, _, kind in todo:
         kinds[kind] = kinds.get(kind, 0) + 1
@@ -2126,6 +2189,12 @@ def main():
             state = RetagState(path)
         run_all(stash, cfg, ids, "retag", state)
         tidy_mono(stash, ids)
+    elif mode == "detail":
+        if not cfg["detectLowDetail"]:
+            log("w", "the Low Detail setting is off: nothing to measure")
+        else:
+            path = state_path(payload.get("server_connection"), DETAIL_STATE_FILE)
+            run_all(stash, cfg, ids, mode, RetagState.load(path) or RetagState(path))
     elif mode == "untagged":
         run_all(stash, cfg, ids, mode)
         tidy_mono(stash, ids)

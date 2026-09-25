@@ -349,3 +349,76 @@ class Decode(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DetailTask(unittest.TestCase):
+    def run_scene(self, sc, measured, **kw):
+        stash, seen = FakeStash(), []
+
+        def measure(c, f):
+            seen.append(f)
+            return measured
+        with mock.patch.object(v, "measure_detail", side_effect=measure), \
+                mock.patch.object(v, "measure_projection") as proj:
+            out = v.process_detail(stash, cfg(**kw), sc, IDS, "detail")
+        proj.assert_not_called()
+        return stash, out, seen
+
+    def test_soft_file_gets_low_detail_and_nothing_else_changes(self):
+        sc = scene(tags=["FISHEYE", "SBS", "8K", "HQ", "Custom"])
+        stash, out, seen = self.run_scene(sc, {"verdict": {"ratio": 0.05, "eff": 4000, "blocks": 4}})
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(names(stash.writes[0]["tag_ids"]),
+                         {"FISHEYE", "SBS", "8K", "HQ", "Custom", v.LOW_DETAIL})
+        self.assertIn("added", out)
+
+    def test_sharp_file_loses_a_stale_tag(self):
+        sc = scene(tags=["DOME", "8K", v.LOW_DETAIL])
+        stash, out, _ = self.run_scene(sc, {"verdict": {"ratio": 0.2, "eff": 6000, "blocks": 4}})
+        self.assertEqual(names(stash.writes[0]["tag_ids"]), {"DOME", "8K"})
+        self.assertIn("removed", out)
+
+    def test_unchanged_or_unreadable_writes_nothing(self):
+        sc = scene(tags=["DOME", "8K"])
+        stash, out, _ = self.run_scene(sc, {"verdict": {"ratio": 0.2, "eff": 6000, "blocks": 4}})
+        self.assertEqual((stash.writes, out), ([], None))
+        sc = scene(tags=["DOME", "8K", v.LOW_DETAIL])
+        stash, out, _ = self.run_scene(sc, {})     # nothing decoded: left alone
+        self.assertEqual((stash.writes, out), ([], None))
+
+    def test_no_tier_is_not_decoded_and_drops_the_tag(self):
+        sc = scene(files=[f8k(60, 3840, 1920)], tags=["DOME", v.LOW_DETAIL])
+        stash, _, seen = self.run_scene(sc, {"verdict": None})
+        self.assertEqual(seen, [])
+        self.assertEqual(names(stash.writes[0]["tag_ids"]), {"DOME"})
+
+    def test_skip_and_secondary_file(self):
+        stash, out, seen = self.run_scene(scene(tags=[v.SKIP, "8K"]), {})
+        self.assertEqual((seen, stash.writes, out), ([], [], None))
+        big = dict(f8k(), size=99)
+        stash, _, seen = self.run_scene(scene(files=[f8k(), big], tags=["8K"]), {})
+        self.assertEqual((seen, stash.writes), ([], []))
+
+    def test_measure_detail(self):
+        f = f8k()
+        with mock.patch.object(v.os.path, "exists", return_value=False):
+            self.assertEqual(v.measure_detail(cfg(), f), {})
+        with mock.patch.object(v.os.path, "exists", return_value=True):
+            self.assertEqual(v.measure_detail(cfg(), dict(f, width=800, height=400)),
+                             {"verdict": None})
+            with mock.patch.object(v, "grab_crop", return_value=None):
+                self.assertEqual(v.measure_detail(cfg(), f), {})
+            crop = bytes(1024 * 1024)                  # black: no textured blocks
+            with mock.patch.object(v, "grab_crop", return_value=crop) as g:
+                self.assertEqual(v.measure_detail(cfg(), f), {"verdict": None})
+            self.assertEqual(g.call_count, 2)
+            self.assertEqual(g.call_args[0][3], v.detail_box(8192, 4096))
+
+    def test_run_all_uses_the_detail_handler_for_measured_scenes_only(self):
+        vr, flat = scene(sid="1"), scene(sid="2")
+        todo = [(vr, v.process_scene, "VR"), (flat, v.process_flat_scene, "flat 3D")]
+        with mock.patch.object(v, "candidates", return_value=todo), \
+                mock.patch.object(v, "process_detail", return_value=None) as pd, \
+                mock.patch.object(v, "log"):
+            v.run_all(FakeStash(), cfg(), IDS, "detail")
+        self.assertEqual([c[0][2]["id"] for c in pd.call_args_list], ["1"])

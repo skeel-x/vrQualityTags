@@ -379,6 +379,12 @@ whose clips mix formats is left without `Alpha` because both frames must agree.
   deletes the file.
 * **Restart the retag from the beginning**: the same retag, but it ignores any
   saved progress and starts from the first scene.
+* **Measure the detail of all tiered scenes**: for every scene the retag would
+  visit that has a quality tier, decodes only the native crop of two frames
+  and adds or removes `Low Detail` (see [Honest resolution](#honest-resolution)).
+  No other tag is touched and there is no projection measurement, watermark
+  OCR or SLR lookup, so it is the quick way to judge an existing library.
+  Resumable like the retag, with its own `vrQualityTags.detail-state.json`.
 * **Remove stray MONO tags**: removes `MONO` from every scene, anywhere in the
   library, that carries no VR projection tag (`DOME`, `SPHERE`, `FISHEYE`, a
   lens tag, `CUBEMAP` or `EAC`). `MONO` only sets the stereo mode of a VR
@@ -479,8 +485,8 @@ were not measured.
 file when that is the file the tier was judged by. It adds about 0.7 s per
 scene of pure-Python arithmetic; the decode is shared with the projection
 measurement. A scene that is not measured keeps whatever the last
-measurement decided; run *Re-measure and retag all VR scenes* once to judge
-an existing library.
+measurement decided; run *Measure the detail of all tiered scenes* (or a
+full retag) once to judge an existing library.
 A scene without a tier tag, and every scene when the setting is off, has the
 tag removed.
 

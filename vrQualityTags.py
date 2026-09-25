@@ -53,6 +53,8 @@ above say.
 
 The quality tier is measured from the file itself: width decides it, and in
 the 6K band the bitrate has to agree too, because that is where upscales hide.
+A file whose pixels lack the detail of their resolution (an upscale), or whose
+bitrate is too low to keep it, also gets Low Detail: see low_detail().
 
 Outside the VR path a file is measured only when Stash's metadata alone says it
 is VR (a 2:1 or square frame at least 3840 wide, or a VR marker in its name).
@@ -63,6 +65,7 @@ file there is left untouched.
 Pure standard library on purpose: the plugin interpreter has no numpy or PIL,
 and arithmetic over a 256px thumbnail does not need them.
 """
+import cmath
 import json
 import math
 import operator
@@ -87,6 +90,8 @@ DEFAULTS = {
     "min7kWidth": 7000,
     "min6kWidth": 5760,
     "min6kBitrateMbit": 40,
+    # tag scenes whose file lacks the detail of its tier with LOW_DETAIL
+    "detectLowDetail": True,
     # projection
     "readFovWatermark": True,
     "overwrite": False,
@@ -107,7 +112,7 @@ DEFAULTS = {
 
 NUMERIC = ("min8kWidth", "min7kWidth", "min6kWidth", "min6kBitrateMbit", "minWidth")
 BOOLEAN = ("readFovWatermark", "overwrite", "measureVrShapedOutside", "flat3dFilenameScan",
-           "slrLookup")
+           "slrLookup", "detectLowDetail")
 
 # ---------------------------------------------------------------- vocabulary
 # Mirrors stash-vr's default video rules (internal/config/settings.go).
@@ -621,20 +626,250 @@ def grab(cfg, path, ts, tw, th):
     return p.stdout[:tw * th * 3]
 
 
-def probe(cfg, path, w, h, duration):
-    """Median metrics over two frames."""
+def grab_with_crop(cfg, path, ts, tw, th, box):
+    """grab() plus a native-resolution grey crop (x, y, w, h) of the same
+    decoded frame: (yuv, crop), either of them None when it failed. One decode
+    serves both (the decode is the expensive part); the crop goes through a
+    temporary file because two raw outputs cannot share stdout."""
+    x, y, cw, ch = box
+    tmp = f"/tmp/vrq_crop_{os.getpid()}.raw"
+    graph = (f"[0:v]split=2[a][b];[a]scale={tw}:{th}:out_range=pc[t];"
+             f"[b]crop={cw}:{ch}:{x}:{y}[c]")
+    cmd = [cfg["ffmpegPath"], "-nostdin", "-v", "error", "-y", "-skip_frame", "nokey",
+           "-ss", f"{ts:.3f}", "-i", path, "-filter_complex", graph,
+           "-map", "[t]", "-frames:v", "1", "-pix_fmt", "yuv444p", "-f", "rawvideo", "-",
+           "-map", "[c]", "-frames:v", "1", "-pix_fmt", "gray", "-f", "rawvideo", tmp]
+    crop = None
+    try:
+        p = subprocess.run(cmd, capture_output=True, timeout=300)
+        if os.path.exists(tmp):
+            with open(tmp, "rb") as f:
+                crop = f.read()
+    except (OSError, subprocess.SubprocessError):
+        return None, None
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    yuv = p.stdout[:tw * th * 3] if p.returncode == 0 and len(p.stdout) >= tw * th * 3 else None
+    if p.returncode != 0 or crop is None or len(crop) < cw * ch:
+        crop = None
+    return yuv, crop and crop[:cw * ch]
+
+
+def probe(cfg, path, w, h, duration, detail=False):
+    """Median metrics over two frames. With detail, the same two decodes also
+    yield a native crop of the eye centre each, and res["detail"] holds
+    detail_verdict() of them (None: not measurable)."""
     tw, th = thumb_size(w, h)
     wide = w / h > 1.5
-    frames = []
+    box = detail_box(w, h) if detail else None
+    frames, blocks = [], []
     n = tw * th
     for frac in (0.4, 0.6):
-        yuv = grab(cfg, path, (duration or 600) * frac, tw, th)
+        ts = (duration or 600) * frac
+        if box:
+            yuv, crop = grab_with_crop(cfg, path, ts, tw, th, box)
+            if crop:
+                blocks.append(detail_blocks(crop, box[2], box[3]))
+        else:
+            yuv = grab(cfg, path, ts, tw, th)
         if yuv is None:
             continue
         m = frame_metrics(yuv_to_rgb(yuv, n), tw, th, wide, grey=yuv[:n])
         if m:
             frames.append(m)
-    return combine_frames(frames)
+    res = combine_frames(frames)
+    if res is not None and box:
+        res["detail"] = detail_verdict(blocks, w)
+    return res
+
+
+# ------------------------------------------------------------- honest resolution
+#
+# A file can have 8K pixels without 8K detail: an upscale of a smaller master,
+# or a bitrate too low to keep the finest detail. Such a scene keeps its tier
+# tag and also gets LOW_DETAIL. The pixels are judged on a native-resolution
+# crop from the centre of the left (or only, or top) eye, where a VR lens is
+# sharpest: the power spectrum along its rows and columns says how much of the
+# picture's gradient energy sits above half the Nyquist frequency. Genuine
+# footage at the file's resolution keeps a real share there; an upscale from
+# half the size has next to none, whatever the pixel count claims.
+# See README "Honest resolution" for the calibration.
+
+LOW_DETAIL = "Low Detail"
+DETAIL_CROP = 1024          # side of the native crop, in file pixels
+DETAIL_BLOCK = 512          # FFT length; the crop is cut into blocks this size
+DETAIL_LINE_STEP = 2        # every other row and column of a block is enough
+DETAIL_SPLIT = 0.5          # "high" frequencies: above this fraction of Nyquist
+DETAIL_TOP = 0.95           # ignored above this: a spike at Nyquist (dithering,
+                            # line patterns of some encoders) is not detail
+DETAIL_MIN_TEXTURE = 3.0    # mean squared luma step per pixel; flatter blocks
+                            # (a wall, a fade, darkness) only measure noise
+DETAIL_MIN_BLOCKS = 2       # textured blocks a verdict needs (of 4 per frame)
+DETAIL_EFF_SHARE = 0.05     # effective resolution: the frequency above which
+                            # this share of the energy lies
+DETAIL_MIN_RATIO = 0.08     # below this share (in the sharpest frame) the
+                            # file lacks the detail of its resolution
+LOW_DETAIL_BITS = 0.8       # bits per pixel and second: 26.8 Mbit/s at
+                            # 8192x4096, 23.6 at 7680x3840, 20.7 at 7200x3600
+
+_FFT_PLANS = {}
+
+
+def _fft_plan(n):
+    """Bit-reversal order, per-stage twiddles and a Hann window for length n."""
+    if n not in _FFT_PLANS:
+        bits = n.bit_length() - 1
+        rev = [int(format(i, f"0{bits}b")[::-1], 2) for i in range(n)]
+        stages, h = [], 1
+        while h < n:
+            stages.append((h, [cmath.exp(-1j * math.pi * k / h) for k in range(h)]))
+            h *= 2
+        win = [0.5 - 0.5 * math.cos(2 * math.pi * (i + 0.5) / n) for i in range(n)]
+        _FFT_PLANS[n] = (rev, stages, win)
+    return _FFT_PLANS[n]
+
+
+def fft(values):
+    """Iterative radix-2 FFT of a list of complex numbers (length a power of 2)."""
+    rev, stages, _ = _fft_plan(len(values))
+    a = [values[i] for i in rev]
+    n = len(a)
+    for h, tw in stages:
+        for s in range(0, n, 2 * h):
+            for k in range(h):
+                u, v = a[s + k], a[s + k + h] * tw[k]
+                a[s + k], a[s + k + h] = u + v, u - v
+    return a
+
+
+def gradient_spectrum(lines, n):
+    """Summed power spectrum of equally long lines of pixels, weighted by the
+    response of a first difference (the spectrum of the gradient), for
+    frequency bins 0 .. n/2 (Nyquist). Each line has its mean removed and a
+    Hann window applied; two real lines share one complex FFT."""
+    _, _, win = _fft_plan(n)
+    half = n // 2
+    p = [0.0] * (half + 1)
+    for i in range(0, len(lines) - 1, 2):
+        a, b = lines[i], lines[i + 1]
+        ma, mb = sum(a) / n, sum(b) / n
+        z = fft([complex((x - ma) * w, (y - mb) * w) for x, y, w in zip(a, b, win)])
+        for k in range(1, half + 1):
+            p[k] += (abs(z[k]) ** 2 + abs(z[-k]) ** 2) / 2
+    return [pk * (2 * math.sin(math.pi * k / n)) ** 2 for k, pk in enumerate(p)]
+
+
+def detail_box(w, h):
+    """(x, y, side, side) of the native crop: centred in the left eye of a wide
+    frame, in the top half of any other (the upper eye of a top/bottom pair,
+    well inside the picture of a mono one). None when the eye is too small."""
+    if w / h > 1.5:
+        ew, eh, cx, cy = w // 2, h, w // 4, h // 2
+    else:
+        ew, eh, cx, cy = w, h // 2, w // 2, h // 4
+    side = min(DETAIL_CROP, ew, eh) // DETAIL_BLOCK * DETAIL_BLOCK
+    if side < DETAIL_BLOCK:
+        return None
+    x = min(max(0, cx - side // 2), w - side)
+    y = min(max(0, cy - side // 2), h - side)
+    return x, y, side, side
+
+
+def detail_blocks(buf, cw, ch):
+    """The normalised gradient spectrum of every textured block of a grey
+    crop (cw x ch bytes). Flat or dark blocks are left out: what they hold
+    above half Nyquist is noise, not detail."""
+    n, step = DETAIL_BLOCK, DETAIL_LINE_STEP
+    out = []
+    for by in range(0, ch - n + 1, n):
+        for bx in range(0, cw - n + 1, n):
+            rows = [buf[(by + y) * cw + bx:(by + y) * cw + bx + n] for y in range(0, n, step)]
+            mean = sum(sum(r) for r in rows) / (len(rows) * n)
+            if not 20 <= mean <= 235:
+                continue
+            cols = [buf[by * cw + bx + x:(by + n) * cw:cw] for x in range(0, n, step)]
+            g = gradient_spectrum(rows, n)
+            gc = gradient_spectrum(cols, n)
+            g = [a + b for a, b in zip(g, gc)]
+            total = sum(g)
+            # Parseval with the Hann window (mean square 0.375): the mean
+            # squared step between neighbouring pixels
+            texture = total / (0.375 * n * n * (len(rows) + len(cols)) / 2)
+            if texture < DETAIL_MIN_TEXTURE:
+                continue
+            out.append([v / total for v in g])
+    return out
+
+
+def frame_detail(blocks, width):
+    """{ratio, eff, blocks} of one frame's textured blocks (detail_blocks()),
+    or None when it has none.
+
+    ratio: share of the gradient energy between DETAIL_SPLIT and DETAIL_TOP of
+    Nyquist, of all of it up to DETAIL_TOP, averaged over the blocks.
+    eff: effective resolution, the file width times the largest fraction of
+    Nyquist below which all but DETAIL_EFF_SHARE of that energy lies (the
+    largest downscale that removes less than that share).
+    """
+    if not blocks:
+        return None
+    half = len(blocks[0]) - 1
+    pooled = [sum(b[k] for b in blocks) / len(blocks) for k in range(half + 1)]
+    top = int(DETAIL_TOP * half)
+    split = int(DETAIL_SPLIT * half)
+    total = sum(pooled[1:top + 1])
+    if total <= 0:
+        return None
+    ratio = sum(pooled[split + 1:top + 1]) / total
+    acc, cut = 0.0, top
+    while cut > 1 and acc + pooled[cut] < DETAIL_EFF_SHARE * total:
+        acc += pooled[cut]
+        cut -= 1
+    return {"ratio": round(ratio, 4), "eff": int(round(width * cut / half)),
+            "blocks": len(blocks)}
+
+
+def detail_verdict(frames, width):
+    """The detail of a file: frame_detail() of its sharpest frame, given the
+    textured blocks of each frame; None (unknown) when the frames hold fewer
+    than DETAIL_MIN_BLOCKS textured blocks in all. The sharpest frame counts
+    because a soft frame proves little (focus on the far wall, motion blur),
+    while an upscale has no sharp frame at all; "blocks" is the total."""
+    if sum(len(b) for b in frames) < DETAIL_MIN_BLOCKS:
+        return None
+    measured = [d for d in (frame_detail(b, width) for b in frames) if d]
+    best = dict(max(measured, key=lambda d: d["ratio"]))
+    best["blocks"] = sum(len(b) for b in frames)
+    return best
+
+
+def bits_per_pixel(f):
+    """Bits per pixel and second of a Stash file record, or None."""
+    w, h, br = f.get("width") or 0, f.get("height") or 0, f.get("bit_rate") or 0
+    return br / (w * h) if w and h and br else None
+
+
+def low_detail(f, detail):
+    """(True/False/None, reason) for a file that earned a tier tag. True when
+    the pixels lack the detail (ratio below DETAIL_MIN_RATIO) or the bitrate
+    is below LOW_DETAIL_BITS; False when neither holds and the pixels were
+    measured; None when the bitrate is fine and the pixels are unknown (never
+    tagged on unknown)."""
+    bpp = bits_per_pixel(f)
+    why = []
+    if detail:
+        why.append(f"detail {detail['ratio']:.3f} (effective width ~{detail['eff']}, "
+                   f"{detail['blocks']} blocks)")
+    else:
+        why.append("detail unknown")
+    if bpp is not None:
+        why.append(f"{bpp:.2f} bit/px/s")
+    starved = bpp is not None and bpp < LOW_DETAIL_BITS
+    soft = bool(detail) and detail["ratio"] < DETAIL_MIN_RATIO
+    if starved or soft:
+        return True, ", ".join(why)
+    return (False if detail else None), ", ".join(why)
 
 
 # ------------------------------------------------------------- classification
@@ -1301,13 +1536,18 @@ def quality_names(cfg):
     return (cfg["tag8k"], cfg["tag7k"], cfg["tag6kHbr"], cfg["parentTag"])
 
 
+def tier_file(scene):
+    """The file a scene's quality is judged by: a scene can hold several
+    files, and the biggest one is the one worth judging. None without files."""
+    files = scene.get("files") or []
+    return max(files, key=lambda x: x.get("size") or 0) if files else None
+
+
 def tier_of(scene, cfg):
     """Which quality tag (setting key) this scene earns, or None."""
-    files = scene.get("files") or []
-    if not files:
+    f = tier_file(scene)
+    if f is None:
         return None
-    # a scene can hold several files; the biggest one is the one worth judging
-    f = max(files, key=lambda x: x.get("size") or 0)
     width = f.get("width") or 0
     mbit = (f.get("bit_rate") or 0) / 1e6
     if width >= cfg["min8kWidth"]:
@@ -1463,6 +1703,13 @@ def ensure_tags(stash, cfg):
     for name in PROJECTION_TAGS + (SKIP,) + quality_names(cfg):
         if name not in found:
             get_or_create(name)
+    if cfg.get("detectLowDetail", True):
+        get_or_create(LOW_DETAIL)
+    else:
+        # off: an existing tag is still managed (removed), none is created
+        hits = stash.call(TAG_BY_NAME, {"n": LOW_DETAIL})["findTags"]["tags"]
+        if hits:
+            found[LOW_DETAIL] = hits[0]
 
     parent = found[cfg["parentTag"]]
     for key in ("tag8k", "tag7k", "tag6kHbr"):
@@ -1501,9 +1748,13 @@ def lookup_slr(cfg, scene, w, h, res, screen_px, stereo_px):
     return vetted, why
 
 
-def measure_projection(cfg, scene):
+def measure_projection(cfg, scene, detail=None):
     """(wanted projection tag names, reason) or (None, reason) when the scene
-    cannot be measured and its projection tags must be left alone."""
+    cannot be measured and its projection tags must be left alone.
+
+    detail: a dict to also measure the primary file's detail into (same
+    decodes, see probe()); once the frames were measured it holds "verdict",
+    detail_verdict() or None. Left empty when nothing was decoded."""
     files = scene.get("files") or []
     if not files:
         return None, "no file"
@@ -1517,7 +1768,10 @@ def measure_projection(cfg, scene):
     fn = parse_filename(path)
     # one cheap ffprobe call before any frame is decoded
     meta_claim = read_metadata(cfg, path)
-    res = probe(cfg, path, w, h, dur)
+    res = probe(cfg, path, w, h, dur, detail=True) if detail is not None else \
+        probe(cfg, path, w, h, dur)
+    if detail is not None and res is not None:
+        detail["verdict"] = res.get("detail")
     if res and fn["alpha_candidate"] and res.get("matte_any"):
         res["matte"] = True
     screen, stereo, why = classify(w, h, res)
@@ -1562,28 +1816,61 @@ def process_scene(stash, cfg, scene, ids, mode):
     have = {t["id"] for t in scene.get("tags") or []}
 
     if mode == "clear":
-        scope_names = set(PROJECTION_TAGS) | set(quality_names(cfg))
+        scope_names = set(PROJECTION_TAGS) | set(quality_names(cfg)) | {LOW_DETAIL}
         want_names, why = set(), "cleared"
     else:
         scope_names = set(quality_names(cfg))
         want_names = quality_want(scene, cfg)
         why = "quality"
+        tier = tier_of(scene, cfg)
+        # the detail is measured on the primary file, so only when that is
+        # the file the tier was judged by
+        detail = ({} if cfg["detectLowDetail"] and tier and
+                  tier_file(scene) is (scene.get("files") or [None])[0] else None)
         remeasure = mode == "retag" or cfg["overwrite"]
         if remeasure or not settled(have_names):
-            proj, reason = measure_projection(cfg, scene)
+            proj, reason = measure_projection(cfg, scene, detail)
             if proj is not None:
                 scope_names |= set(PROJECTION_TAGS)
                 want_names |= proj
                 why = reason
             elif reason == "file missing":
                 log("w", f"scene {scene['id']}: file missing, projection skipped")
+        scope, want, ld_why = low_detail_tags(cfg, scene, tier, detail)
+        scope_names |= scope
+        want_names |= want
+        if ld_why:
+            why += f", {ld_why}"
 
+    # LOW_DETAIL has no id when the feature is off and the tag never existed
+    scope_names = {n for n in scope_names if n in ids}
     new = diff_tags(have, {ids[n] for n in scope_names}, {ids[n] for n in want_names})
     if new is None:
         return None
     stash.call(SCENE_UPDATE, {"i": {"id": scene["id"], "tag_ids": sorted(new)}})
     managed = scope_names & {n for n in ids if ids[n] in new}
     return f"{' '.join(sorted(managed)) or '(none)'}  ({why})"
+
+
+def low_detail_tags(cfg, scene, tier, detail):
+    """(scope, want, text for the log) of LOW_DETAIL for one scene.
+
+    Off (detectLowDetail false): removed. No tier tag: removed. Measured this
+    pass (detail holds a verdict): the full rule, low_detail(). Not measured:
+    only the bitrate floor can add it (it qualifies whatever the pixels say);
+    otherwise the tag is left as the last measurement set it.
+    """
+    if not cfg["detectLowDetail"] or not tier:
+        return {LOW_DETAIL}, set(), ""
+    f = tier_file(scene)
+    if detail and "verdict" in detail:
+        low, why = low_detail(f, detail["verdict"])
+        return {LOW_DETAIL}, ({LOW_DETAIL} if low else set()), f"low detail: {why}" if low \
+            else why
+    bpp = bits_per_pixel(f)
+    if bpp is not None and bpp < LOW_DETAIL_BITS:
+        return {LOW_DETAIL}, {LOW_DETAIL}, f"low detail: {bpp:.2f} bit/px/s"
+    return set(), set(), ""
 
 
 def process_flat_scene(stash, cfg, scene, ids, mode):

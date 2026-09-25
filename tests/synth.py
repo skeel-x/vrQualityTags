@@ -106,3 +106,45 @@ def panorama(w=256, h=128, seed=8):
     def px(x, y):
         return grey(noise(((x + 4) // 8) % blocks, y // 8, seed))
     return frame(w, h, px)
+
+
+# ------------------------------------------------------------ detail (grey)
+
+def grey_noise(w, h, seed=0):
+    """A w x h grey buffer of per-pixel noise: detail up to Nyquist."""
+    return bytes(noise(x, y, seed) for y in range(h) for x in range(w))
+
+
+def soften(buf, w, h):
+    """A [1, 2, 1] / 4 blur along both axes: the softness of a real lens,
+    which leaves a genuine picture detail below Nyquist but not at it."""
+    rows = []
+    for y in range(h):
+        r = buf[y * w:(y + 1) * w]
+        rows.append([(r[max(0, x - 1)] + 2 * r[x] + r[min(w - 1, x + 1)]) / 4 for x in range(w)])
+    out = bytearray(w * h)
+    for y in range(h):
+        a, b, c = rows[max(0, y - 1)], rows[y], rows[min(h - 1, y + 1)]
+        for x in range(w):
+            out[y * w + x] = int((a[x] + 2 * b[x] + c[x]) / 4 + 0.5)
+    return bytes(out)
+
+
+def upscale2(buf, w, h):
+    """A bilinear 2x upscale of a w x h grey buffer (pixel centres aligned,
+    as ffmpeg's scaler does)."""
+    def taps(i, n):
+        c = (i + 0.5) / 2 - 0.5
+        j = math.floor(c)
+        return max(0, j), min(n - 1, j + 1), c - j
+    big_w = 2 * w
+    xs = [taps(x, w) for x in range(big_w)]
+    out = bytearray(big_w * 2 * h)
+    for y in range(2 * h):
+        y0, y1, ty = taps(y, h)
+        r0, r1 = buf[y0 * w:(y0 + 1) * w], buf[y1 * w:(y1 + 1) * w]
+        for x, (x0, x1, tx) in enumerate(xs):
+            a = r0[x0] + (r0[x1] - r0[x0]) * tx
+            b = r1[x0] + (r1[x1] - r1[x0]) * tx
+            out[y * big_w + x] = int(a + (b - a) * ty + 0.5)
+    return bytes(out)

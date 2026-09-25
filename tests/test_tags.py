@@ -520,7 +520,7 @@ class Resume(unittest.TestCase):
     def run_retag(self, lib, state, fail_on=None):
         seen, logs = [], []
 
-        def measure(c, sc):
+        def measure(c, sc, detail=None):
             seen.append(sc["id"])
             if sc["id"] == fail_on:
                 raise KeyboardInterrupt           # the task is killed mid-scene
@@ -600,7 +600,7 @@ class Resume(unittest.TestCase):
         payload = {"server_connection": {"PluginDir": self.dir.name}, "args": {"mode": mode}}
         seen = []
 
-        def measure(c, sc):
+        def measure(c, sc, detail=None):
             seen.append(sc["id"])
             return {v.DOME, v.SBS}, "why"
 
@@ -687,7 +687,7 @@ class StrayMono(unittest.TestCase):
         payload = {"server_connection": {}, "args": {"mode": mode}}
         measured = []
 
-        def measure(c, sc):
+        def measure(c, sc, detail=None):
             measured.append(sc["id"])
             return {v.DOME, v.SBS}, "why"
 

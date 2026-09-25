@@ -62,6 +62,7 @@ effect in the headset. Tags outside this table are never added or removed.
 | corner-packed alpha matte (passthrough) | `Alpha` |
 | chroma-key (green screen) passthrough, from the SLR lookup | `Chroma Key` |
 | quality | `8K` / `7K` / `6K HBR`, each with the parent `HQ` |
+| a tier file without the detail of its resolution (upscale, starved bitrate) | `Low Detail`, next to the tier tag (see [Honest resolution](#honest-resolution)) |
 | probed, not recognised | `VRP: Unresolved` |
 | your opt-out | `VRP: Skip`: add it to a scene and the plugin never touches that scene |
 
@@ -410,11 +411,12 @@ scene whose tags are already right is not written to.
 | Parent tag, 8K/7K/6K tag names | `HQ`, `8K`, `7K`, `6K HBR` | quality tag names |
 | 8K/7K/6K minimum width | 7680, 7000, 5760 | tier boundaries |
 | 6K minimum bitrate (Mbit/s) | 40 | a 6K file below this is treated as an upscale |
+| Tag Low Detail | on | judge whether a tier file carries the detail of its resolution and tag `Low Detail` when it does not (see [Honest resolution](#honest-resolution)); off removes the tag |
 | Stash API key (for long tasks) | empty | Stash ends a plugin task's session after an hour, so a full retag of a large library stops part way with `401 Unauthorized`. Paste your API key (*Settings -> Security*) and the plugin authenticates with it instead. |
 
 Stash shows an untouched on/off setting as off; the plugin treats an untouched
-setting as its default (on for the watermark, the VR-shaped check and the flat
-3D check). Switch it
+setting as its default (on for the watermark, the VR-shaped check, the flat
+3D check and Low Detail). Switch it
 on and off once to store an explicit value.
 
 ## Quality tiers
@@ -431,6 +433,87 @@ these come from the file itself (the largest file of the scene). The bitrate
 condition only applies to the 6K band, which is where upscales tend to hide.
 `HQ` is applied directly too, because a VR bridge that forwards only directly
 assigned tags would otherwise never see it.
+
+## Honest resolution
+
+A file can have 8K pixels without 8K detail: an upscale of a smaller master
+("remastered in 8K"), or a bitrate too low to keep the finest detail. Such a
+scene keeps its tier tag and also gets `Low Detail`, so a player can show the
+difference (stash-vr draws the tier badge of a `Low Detail` scene in a muted
+colour: gold 8K is true 8K, slate 8K is 8K pixels without the detail).
+
+**The measure.** The two frames decoded for the projection also give a native
+resolution crop each (no scaling, no extra decode): 1024 x 1024 grey pixels
+from the centre of the left eye (the top half of a frame that is not wide),
+where a VR lens is sharpest. Each 512 x 512 block of the crop is analysed with
+an FFT along its rows and columns (every other line), weighted as a gradient:
+
+* **detail ratio**: the share of the gradient energy between 0.5 and 0.95 of
+  the Nyquist frequency. A picture sampled at the file's resolution keeps a
+  real share there; an upscale from half the size has next to none, because
+  nothing above its source's Nyquist was ever recorded. The last 5 % below
+  Nyquist are left out: some encoders leave a pixel-level pattern there that
+  is not detail.
+* **effective resolution** (logged): the file width times the largest
+  fraction of Nyquist below which 95 % of that energy lies, which is the
+  largest downscale that would remove less than 5 % of it.
+* **texture**: a block whose mean squared step between neighbouring pixels is
+  below 3 (a wall, a fade) or whose mean is darker than 20 or brighter than
+  235 is left out, because what it holds at high frequencies is noise. Fewer
+  than two textured blocks in the two frames together make the detail
+  *unknown*, and unknown pixels never earn the tag.
+* The **sharpest frame** decides: a soft frame proves little (the focus on a
+  far wall, motion blur), while an upscale has no sharp frame at all.
+
+**The rule.** `Low Detail` when the detail ratio is below **0.08**, or the
+bitrate is below **0.8 bit per pixel and second** (26.8 Mbit/s at 8192x4096,
+23.6 at 7680x3840, 20.7 at 7200x3600; a `6K HBR` file already needs 40 Mbit/s
+and is never that low). The bitrate floor catches files whose centre crop
+happens to look fine but whose motion and periphery are starved.
+
+**When it is applied.** The detail is measured whenever a scene is measured
+(a new scene, the untagged task, a retag) and has a tier tag, on the primary
+file when that is the file the tier was judged by. It adds about 0.7 s per
+scene of pure-Python arithmetic; the decode is shared with the projection
+measurement. A scene that is not measured only gets `Low Detail` from the
+bitrate floor, and keeps whatever the last measurement decided otherwise;
+run *Re-measure and retag all VR scenes* once to judge an existing library.
+A scene without a tier tag, and every scene when the setting is off, has the
+tag removed.
+
+**Calibration.** About 180 tier files, native crops of two frames each: 8K
+files from a spread of studios, likely upscales (remastered releases, releases
+dated before 2019 that are now 8K, the lowest-bitrate tenth of the 8K files),
+7K and 6K HBR samples, and a random sample of all tier files. Several crops of
+each end were looked at in full resolution: low ratios are visibly soft
+(smeared hair and fabric, waxy skin, mushy walls), high ones show single hairs
+and skin texture.
+
+| Group | Files | Detail ratio (sharpest frame) | `Low Detail` |
+|---|---|---|---|
+| 8K, spread of studios | 45 | 0.046 - 0.42, median 0.13 | 8 |
+| 8K, remastered releases | 16 | 0.067 - 0.23, median 0.11 | 3 |
+| 8K, releases dated before 2019 | 14 | 0.074 - 0.46, median 0.12 | 1 |
+| 8K, lowest-bitrate tenth | 14 | 0.043 - 0.18, median 0.08 | 9 (6 by the floor) |
+| 7K | 10 | 0.043 - 0.18, median 0.10 | 1 |
+| 6K HBR | 10 | 0.088 - 0.25, median 0.15 | 0 |
+| random tier files | 72 | 0.050 - 0.34, median 0.13 | 18 (8 of 42 8K, 10 of 26 7K, 0 of 4 6K HBR) |
+
+Two files had too little texture in their crops and stayed unknown.
+
+Synthetic check (the unit tests): the same lens softness applied to noise
+sampled at the file's size gives a ratio of about 0.28 and an effective width
+of 0.68 of the frame; sampled at half the size and upscaled 2x it gives 0.025
+and 0.34.
+
+The groups overlap: detail is a continuum, and nothing separates an upscale
+from a genuinely soft lens or a missed focus, which is fine, since either way
+the file does not carry the detail its resolution claims. Remastered and old
+releases mostly pass: whatever made them 8K (a larger master than their age
+suggests, or an upscaler that sharpens or invents texture) left real energy
+near Nyquist. The threshold is set where the visibly soft files are; no file
+whose crops were seen to hold fine detail falls below it (one such file is
+tagged by the bitrate floor).
 
 ## Limitations
 
@@ -458,7 +541,11 @@ assigned tags would otherwise never see it.
   fisheye stereo. Mattes packed elsewhere are not tagged `Alpha`.
 * Measuring costs one `ffprobe` call and two decoded frames per scene (a few seconds for 8K HEVC on a
   network share) plus, for a fisheye whose lens is still open, up to eight
-  small crops for the watermark.
+  small crops for the watermark. The detail measure adds about 0.7 s of
+  arithmetic per tier scene and one temporary 1 MB file per frame in `/tmp`.
+* The detail measure sees two 1024 x 1024 crops of the eye centre. An upscale
+  with synthesised detail (AI upscalers that invent texture, heavy sharpening)
+  can pass as detailed.
 
 ## Development
 

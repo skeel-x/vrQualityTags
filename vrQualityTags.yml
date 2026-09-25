@@ -1,5 +1,5 @@
 name: VR Quality Tags
-description: Companion to stash-vr. Measures each VR file and tags its projection, fisheye lens, stereo layout, eye order and passthrough alpha matte, plus a measured quality tier, using the file's own metadata and (optionally) SexLikeReal's scene data where the picture agrees with them. Flat 3D files are recognised by name.
+description: Companion to stash-vr. Measures each VR file and tags its projection, fisheye lens, stereo layout, eye order and passthrough alpha matte, plus a measured quality tier and Low Detail for files without the detail of their resolution, using the file's own metadata and (optionally) SexLikeReal's scene data where the picture agrees with them. Flat 3D files are recognised by name.
 version: 2.3.0
 url: https://github.com/skeel-x/vrQualityTags
 
@@ -72,6 +72,10 @@ settings:
     displayName: 6K minimum bitrate (Mbit/s)
     description: A 6K file below this is an upscale, not a high-quality master.
     type: NUMBER
+  detectLowDetail:
+    displayName: Tag Low Detail
+    description: When a scene is measured and earns a quality tier, also judge whether the file carries the detail its resolution claims, from a native-resolution crop of the two measured frames (no extra decode). An upscale, or a bitrate below 0.8 bit per pixel and second (about 27 Mbit/s at 8192x4096), gets Low Detail next to its tier tag. Scenes that are not measured only get it from the bitrate. Default on; switched off, the tag is removed.
+    type: BOOLEAN
 
 exec:
   - python

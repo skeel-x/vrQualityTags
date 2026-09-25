@@ -1,0 +1,12 @@
+{
+    "streams": [
+        {
+            "width": 4096,
+            "height": 4096,
+            "tags": {
+                "stereo_mode": "top_bottom",
+                "DURATION": "00:30:00.000000000"
+            }
+        }
+    ]
+}

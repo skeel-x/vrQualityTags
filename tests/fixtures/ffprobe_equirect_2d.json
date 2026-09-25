@@ -1,0 +1,25 @@
+{
+    "streams": [
+        {
+            "width": 8192,
+            "height": 4096,
+            "tags": {
+                "language": "eng"
+            },
+            "side_data_list": [
+                {
+                    "side_data_type": "Stereo 3D",
+                    "type": "2D",
+                    "inverted": 0
+                },
+                {
+                    "side_data_type": "Spherical Mapping",
+                    "projection": "equirectangular",
+                    "yaw": 0,
+                    "pitch": 0,
+                    "roll": 0
+                }
+            ]
+        }
+    ]
+}

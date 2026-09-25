@@ -1,0 +1,26 @@
+{
+    "streams": [
+        {
+            "width": 8192,
+            "height": 4096,
+            "tags": {
+                "language": "eng",
+                "encoder": "HEVC Coding"
+            },
+            "side_data_list": [
+                {
+                    "side_data_type": "Stereo 3D",
+                    "type": "side by side",
+                    "inverted": 0
+                },
+                {
+                    "side_data_type": "Spherical Mapping",
+                    "projection": "equirectangular",
+                    "yaw": 0,
+                    "pitch": 0,
+                    "roll": 0
+                }
+            ]
+        }
+    ]
+}

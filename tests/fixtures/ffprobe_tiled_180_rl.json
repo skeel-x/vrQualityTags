@@ -1,0 +1,26 @@
+{
+    "streams": [
+        {
+            "width": 5760,
+            "height": 2880,
+            "side_data_list": [
+                {
+                    "side_data_type": "Stereo 3D",
+                    "type": "side by side",
+                    "inverted": 1
+                },
+                {
+                    "side_data_type": "Spherical Mapping",
+                    "projection": "tiled equirectangular",
+                    "bound_left": 1440,
+                    "bound_top": 0,
+                    "bound_right": 1440,
+                    "bound_bottom": 0,
+                    "yaw": 0,
+                    "pitch": 0,
+                    "roll": 0
+                }
+            ]
+        }
+    ]
+}

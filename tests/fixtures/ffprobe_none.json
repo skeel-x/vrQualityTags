@@ -1,0 +1,13 @@
+{
+    "programs": [],
+    "streams": [
+        {
+            "width": 7680,
+            "height": 3840,
+            "tags": {
+                "language": "und",
+                "handler_name": "VideoHandler"
+            }
+        }
+    ]
+}

@@ -6,11 +6,12 @@ order, the passthrough alpha matte, and a quality tier. It is the companion to
 [stash-vr](https://github.com/skeel-x/stash-vr), whose video rules turn these
 tags into the right player settings in HereSphere and DeoVR.
 
-Most VR files carry no usable metadata: spherical metadata is rare, filenames
-rarely say anything, and the container aspect cannot tell a 180 SBS file from a
-360 mono one or from a fisheye. So the plugin decodes two frames per scene and
-measures the picture, with filename markers and the SLR FOV watermark taking
-precedence where they exist.
+Most VR files carry no usable metadata: spherical metadata is rare (and often
+wrong where it exists), filenames rarely say anything, and the container
+aspect cannot tell a 180 SBS file from a 360 mono one or from a fisheye. So the
+plugin decodes two frames per scene and measures the picture, with the file's
+own metadata (where the picture agrees with it), filename markers and the SLR
+FOV watermark taking precedence where they exist.
 
 ## Requirements
 
@@ -18,7 +19,8 @@ precedence where they exist.
   plugin tasks and hooks.
 * Python 3 as Stash's plugin interpreter. Standard library only: no numpy, no
   PIL, no pip installs.
-* `ffmpeg` on the Stash host (default `/usr/bin/ffmpeg`).
+* `ffmpeg` and `ffprobe` on the Stash host (defaults `/usr/bin/ffmpeg`,
+  `/usr/bin/ffprobe`). Without `ffprobe` the file metadata is not used.
 * Optional: `tesseract` (default `/usr/bin/tesseract`) to read SLR's burned-in
   FOV watermark, which separates 190, 200 and 220 degree fisheye. Without it
   those scenes get plain `FISHEYE`.
@@ -77,7 +79,41 @@ is fixed, because stash-vr matches it by name.
 
 In order of authority:
 
-1. **Filename markers** (case-insensitive).
+1. **File metadata**, read with one `ffprobe` call per scene before any frame
+   is decoded (first video stream, side data and tags):
+   * *Spherical Mapping*: `equirectangular` is a 360 (`SPHERE`) unless its
+     `bound_left` / `bound_right` crop the picture (ffprobe then reports
+     `tiled equirectangular`; a 180 file crops a quarter of the width on each
+     side) -> `DOME`; `half equirectangular` -> `DOME`; `fisheye` ->
+     `FISHEYE`. `cubemap` and the other projections are outside the tag
+     vocabulary and left to the pixels.
+   * *Stereo 3D*: `side by side` -> `SBS`, `top and bottom` -> `TB`, `2D` ->
+     mono; `inverted: 1` means the right eye comes first -> `RL` (with `SBS`).
+   * Matroska `stereo_mode` tag (when there is no Stereo 3D side data):
+     `left_right`, `right_left` (+ `RL`), `top_bottom`, `bottom_top`, `mono`.
+   * A `horizontal_field_of_view` of 190, 200 or 220 (Apple spatial /
+     immersive video, ffprobe 7.1 and later) -> `FISHEYE` + `RF52` / `MKX200` /
+     `MKX220`.
+
+   Few files carry any of this (a few per cent of a sample of VR files; all
+   of them MP4 with both side data entries), and what they carry is often
+   wrong: every file seen with a Spherical Mapping said `equirectangular`
+   without bounds, a full 360, while all of them were 180 side-by-side pairs,
+   and one 180 pair said `2D`. So metadata only counts where the frame agrees:
+   * a claimed layout is dropped when the pixels contradict it: `2D` while the
+     halves match as a stereo pair (median tile match of 0.55 side by side or
+     0.60 top and bottom), a pair whose halves have nothing in common (below
+     0.30), or a layout that leaves no eye of the projection the scene ends up
+     with;
+   * a claimed projection has to agree with the pixels in coarse shape
+     (fisheye or equirect), and its 180 or 360 has to fit the eye the layout
+     leaves: a 2:1 side-by-side frame holds two square 180 eyes, never a 360.
+     Where the pixels found no projection at all, the eye shape alone decides;
+   * a lens only comes with an accepted fisheye projection.
+
+   What survives beats every other source; what was dropped is named in the
+   log line ("metadata ... (not trusted: ...)").
+2. **Filename markers** (case-insensitive).
    * VR layout, as a whole underscore-delimited segment so that title words do
      not count: `_LR_` `_SBS_` -> `SBS`, `_TB_` `_OU_` -> `TB`,
      `_RL_` -> `RL` + `SBS`, `_MONO_` `_2D_` -> mono, `_180` or `180x180` ->
@@ -100,19 +136,19 @@ In order of authority:
    * `Passthrough`, `Pass-Through`, `Alpha`, `alphapacked` only make a scene an
      `Alpha` candidate; the pixels decide.
    * Markers that contradict each other cancel out.
-2. **SLR FOV watermark.** SLR burns `SLR 190/200/220° FOV FISHEYE` into the
+3. **SLR FOV watermark.** SLR burns `SLR 190/200/220° FOV FISHEYE` into the
    top of the frame, centred across the dead space between the eyes (older
    releases: near the top of the left eye); both places are read. Nothing measurable separates those lenses, so where the text is
    readable it is the only authority. Up to eight frames are read with
    tesseract and two must agree. The OCR is skipped when it cannot help:
-   * the filename already names the lens;
-   * the scene does not end up `FISHEYE` (a filename screen marker such as
-     `_180` beats the pixels, so `x_LR_180.mp4` is never read even when the
+   * the file metadata or the filename already names the lens;
+   * the scene does not end up `FISHEYE` (metadata and a filename screen
+     marker such as `_180` beat the pixels, so `x_LR_180.mp4` is never read even when the
      pixels say fisheye);
    * the scene has the corner alpha matte and neither its file name nor its
      path mentions `SLR` or `SexLikeReal`: SLR's own passthrough releases carry
      the watermark, other studios' passthrough scenes never do.
-3. **Frame measurement.** Two frames (40% and 60% into the file, nearest keyframe) are decoded to
+4. **Frame measurement.** Two frames (40% and 60% into the file, nearest keyframe) are decoded to
    a 256 px thumbnail:
    * *stereo*: how well the two halves match (side by side, and top and
      bottom), searched for parallax; see [Stereo and 360](#stereo-and-360). A
@@ -299,7 +335,7 @@ scene whose tags are already right is not written to.
 | Minimum width (px) | 1920 | narrower files are not measured |
 | Measure VR-shaped files outside the path filter | on | measure a scene outside the path filter when its file is a 2:1 or square frame at least 3840 wide or has a VR marker in its name |
 | Tag flat 3D files outside the path filter | on | the flat 3D filename check |
-| ffmpeg path, tesseract path | `/usr/bin/...` | |
+| ffmpeg path, ffprobe path, tesseract path | `/usr/bin/...` | |
 | Parent tag, 8K/7K/6K tag names | `HQ`, `8K`, `7K`, `6K HBR` | quality tag names |
 | 8K/7K/6K minimum width | 7680, 7000, 5760 | tier boundaries |
 | 6K minimum bitrate (Mbit/s) | 40 | a 6K file below this is treated as an upscale |
@@ -338,7 +374,7 @@ assigned tags would otherwise never see it.
   `VRP: Skip` to such a scene.
 * The corner-matte test knows one packing: red silhouettes in the corners of
   fisheye stereo. Mattes packed elsewhere are not tagged `Alpha`.
-* Measuring costs two decoded frames per scene (a few seconds for 8K HEVC on a
+* Measuring costs one `ffprobe` call and two decoded frames per scene (a few seconds for 8K HEVC on a
   network share) plus, for a fisheye whose lens is still open, up to eight
   small crops for the watermark.
 

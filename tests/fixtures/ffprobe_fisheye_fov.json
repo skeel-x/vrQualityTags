@@ -1,0 +1,24 @@
+{
+    "streams": [
+        {
+            "width": 4320,
+            "height": 4320,
+            "side_data_list": [
+                {
+                    "side_data_type": "Stereo 3D",
+                    "type": "unspecified",
+                    "inverted": 0,
+                    "view": "packed",
+                    "primary_eye": "left",
+                    "baseline": 64000,
+                    "horizontal_disparity_adjustment": "0/10000",
+                    "horizontal_field_of_view": "190000/1000"
+                },
+                {
+                    "side_data_type": "Spherical Mapping",
+                    "projection": "fisheye"
+                }
+            ]
+        }
+    ]
+}

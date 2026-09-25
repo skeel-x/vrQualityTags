@@ -31,6 +31,10 @@ settings:
   ffmpegPath:
     displayName: ffmpeg path
     type: STRING
+  ffprobePath:
+    displayName: ffprobe path
+    description: Reads the file's own spherical and stereo 3D metadata (one call per scene, before any frame is decoded). Without it the metadata is simply not used.
+    type: STRING
   tesseractPath:
     displayName: tesseract path
     type: STRING

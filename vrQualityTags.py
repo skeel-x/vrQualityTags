@@ -7,6 +7,12 @@ every tag written here has an effect in the headset.
 
 WHERE THE ANSWER COMES FROM, IN ORDER OF AUTHORITY
 
+  metadata   the file's own spherical / stereo 3D metadata, read with one
+             ffprobe call before any frame is decoded. Rare, and often wrong
+             in the wild (an equirect 360 claim on every 180 file of a
+             studio, 2D on a stereo pair), so each part only counts where the
+             frame agrees with it: see vet_claim().
+
   filename   explicit markers (_LR_, _TB_, _RL_, MKX200, RF52, F180, ...). Most files
              carry none, but when present they are deliberate and beat any
              measurement.
@@ -70,6 +76,7 @@ DEFAULTS = {
     "overwrite": False,
     "minWidth": 1920,
     "ffmpegPath": "/usr/bin/ffmpeg",
+    "ffprobePath": "/usr/bin/ffprobe",
     "tesseractPath": "/usr/bin/tesseract",
     # VR-shaped files outside the VR path, decided from metadata only
     "measureVrShapedOutside": True,
@@ -706,19 +713,204 @@ def classify(w, h, res):
     return screen, stereo, ", ".join(why)
 
 
-def resolve(fn, screen_px, stereo_px, alpha_px, fov=None):
-    """Merge filename markers, the watermark FOV and the pixel verdict into the
-    projection tags a scene should carry. fov is ("190"|"200"|"220", vrca)."""
-    stereo = fn["stereo"] or stereo_px
-    lens = fn["lens"]
-    if lens:
-        screen = FISHEYE
-    else:
-        screen = fn["screen"] or screen_px
-    if screen == FISHEYE and not lens and fov:
-        value, vrca = fov
-        lens = VRCA220 if (vrca and value == "220") else FOV_LENS.get(value)
+# ------------------------------------------------------------- file metadata
 
+# ffprobe's names (libavutil/stereo3d.c, spherical.c); the Matroska StereoMode
+# element also arrives as the stream tag stereo_mode
+_META_STEREO = {"2d": MONO, "side by side": SBS, "side by side (quincunx subsampling)": SBS,
+                "top and bottom": TB}
+_MKV_STEREO = {"mono": (MONO, False), "left_right": (SBS, False), "right_left": (SBS, True),
+               "top_bottom": (TB, False), "bottom_top": (TB, False)}
+_META_EQUIRECT = ("equirectangular", "tiled equirectangular")
+FOV_DEG_LENS = {190: RF52, 200: MKX200, 220: MKX220}
+
+
+def _number(v):
+    """A float from ffprobe's JSON, which prints rationals as "num/den"."""
+    try:
+        if isinstance(v, str) and "/" in v:
+            num, den = v.split("/", 1)
+            return float(num) / float(den) if float(den) else None
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_ffprobe(data):
+    """What a file's own metadata claims about its first video stream, from
+    ffprobe's JSON (stream width, side data and tags). Keys, each only when
+    the metadata says so: screen, stereo, rl, lens, and raw (a short summary
+    for the log). None when there is nothing.
+
+    Spherical Mapping: equirectangular is a 360 unless its left and right
+    bounds crop the picture ("tiled equirectangular"), half equirectangular
+    is a 180, fisheye is FISHEYE; cubemap and the other projections are not
+    in this plugin's vocabulary and are left to the pixels. Stereo 3D: 2D,
+    side by side, top and bottom; inverted means the right eye comes first.
+    A horizontal field of view of 190, 200 or 220 degrees (Apple's spatial
+    and immersive video, newer ffprobe) names the fisheye lens.
+    """
+    streams = (data or {}).get("streams") or []
+    if not streams:
+        return None
+    st = streams[0]
+    width = st.get("width") or 0
+    out, raw = {}, []
+    fov = None
+    for sd in st.get("side_data_list") or []:
+        kind = sd.get("side_data_type")
+        if kind == "Spherical Mapping":
+            proj = str(sd.get("projection") or "").lower()
+            if proj in _META_EQUIRECT:
+                crop = (_number(sd.get("bound_left")) or 0) + (_number(sd.get("bound_right")) or 0)
+                span = 360.0 * (width - crop) / width if width else 360.0
+                out["screen"] = DOME if span <= 270 else SPHERE
+                raw.append(f"{proj} {span:.0f}deg")
+            elif proj == "half equirectangular":
+                out["screen"] = DOME
+                raw.append(proj)
+            elif proj == "fisheye":
+                out["screen"] = FISHEYE
+                raw.append(proj)
+            elif proj:
+                raw.append(f"{proj} (ignored)")
+        elif kind == "Stereo 3D":
+            kind3d = str(sd.get("type") or "").lower()
+            stereo = _META_STEREO.get(kind3d)
+            if stereo:
+                out["stereo"] = stereo
+                out["rl"] = stereo == SBS and bool(_number(sd.get("inverted")))
+                raw.append(kind3d + (" inverted" if out["rl"] else ""))
+            fov = _number(sd.get("horizontal_field_of_view")) or fov
+    mode = str((st.get("tags") or {}).get("stereo_mode") or "").lower()
+    if "stereo" not in out and mode in _MKV_STEREO:
+        out["stereo"], out["rl"] = _MKV_STEREO[mode]
+        out["rl"] = out["rl"] and out["stereo"] == SBS
+        raw.append(f"stereo_mode {mode}")
+    if fov:
+        lens = FOV_DEG_LENS.get(int(round(fov)))
+        raw.append(f"fov {fov:g}")
+        if lens and out.get("screen") in (None, FISHEYE):
+            out["screen"], out["lens"] = FISHEYE, lens
+    if not out:
+        return None
+    out["raw"] = ", ".join(raw)
+    return out
+
+
+def read_metadata(cfg, path):
+    """parse_ffprobe() of one ffprobe call, or None when ffprobe is missing,
+    fails or finds nothing."""
+    cmd = [cfg["ffprobePath"], "-v", "error", "-select_streams", "v:0",
+           "-show_entries", "stream=width,height:stream_side_data:stream_tags",
+           "-of", "json", path]
+    try:
+        p = subprocess.run(cmd, capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if p.returncode != 0:
+        return None
+    try:
+        return parse_ffprobe(json.loads(p.stdout or b"{}"))
+    except ValueError:
+        return None
+
+
+def _coarse(screen):
+    """Fisheye and equirect (180 or 360) are different shapes of picture."""
+    return {FISHEYE: "fisheye", DOME: "equirect", SPHERE: "equirect"}.get(screen, screen)
+
+
+def _eye_fits(w, h, stereo, screen):
+    """Whether a projection is plausible for the eye a stereo layout leaves."""
+    a = eye_aspect(w, h, stereo or MONO)
+    shape = screen_from_eye(a)
+    if screen in (DOME, FISHEYE):
+        return shape == DOME
+    if screen == SPHERE:
+        return shape == SPHERE or (stereo == TB and abs(a - 4.0) < 0.26)
+    return False
+
+
+def vet_claim(claim, w, h, res, screen_px, stereo_px):
+    """The part of an outside claim (file metadata, the SLR lookup) that the
+    frame does not contradict, and what was dropped and why.
+
+    Stereo: a claimed mono picture whose halves match as a stereo pair, or a
+    claimed pair whose halves have nothing in common, is dropped, and so is a
+    layout that leaves no eye of the projection the scene ends up with (mono
+    on a 2:1 frame the pixels read as a 180 pair).
+    Projection: the claim has to agree with the pixels in coarse shape
+    (fisheye or equirect), and its 180 or 360 has to fit the eye the stereo
+    layout leaves (a 2:1 side-by-side frame holds two square 180 eyes, never
+    a 360). Where the pixels found no projection, the eye shape alone
+    decides. A lens only comes with an accepted fisheye projection.
+    """
+    if not claim:
+        return None, []
+    out, dropped = {}, []
+    stereo = claim.get("stereo")
+    if stereo:
+        if res and stereo == MONO and (res["lr"] >= SBS_MIN or res["tb"] >= TB_MIN):
+            dropped.append("mono, but the halves match as a pair")
+        elif res and stereo in (SBS, TB) and res["lr" if stereo == SBS else "tb"] < STEREO_NONE:
+            dropped.append(f"{stereo}, but the halves have nothing in common")
+        else:
+            out["stereo"] = stereo
+            out["rl"] = bool(claim.get("rl")) and stereo == SBS
+    screen = claim.get("screen")
+    if screen:
+        layout = out.get("stereo") or stereo_px
+        if screen_px and _coarse(screen) != _coarse(screen_px):
+            dropped.append(f"{screen}, but the frame is {screen_px}")
+        elif not _eye_fits(w, h, layout, screen):
+            dropped.append(f"{screen}, but the eye of a {w}x{h} {layout or MONO} frame is not")
+        else:
+            out["screen"] = screen
+            if "lens" in claim:
+                out["lens"] = claim["lens"]
+    final = out.get("screen") or screen_px
+    if out.get("stereo") and final in (DOME, SPHERE, FISHEYE) and \
+            not _eye_fits(w, h, out["stereo"], final):
+        # a layout that leaves no eye of the projection the scene ends up with
+        dropped.append(f"{out['stereo']}, but that leaves no {final} eye in a {w}x{h} frame")
+        del out["stereo"], out["rl"]
+    return out, dropped
+
+
+def _lens_of(fov):
+    value, vrca = fov
+    return VRCA220 if (vrca and value == "220") else FOV_LENS.get(value)
+
+
+def decide(fn, screen_px, stereo_px, fov=None, meta=None):
+    """(screen, lens, stereo, rl) from every source, in order of authority:
+    file metadata (vetted, see vet_claim()), filename markers, the watermark
+    FOV, the pixels. A source that names a lens names a fisheye."""
+    fn_claim = {"screen": FISHEYE if fn["lens"] else fn["screen"],
+                "stereo": fn["stereo"], "rl": fn["rl"]}
+    if fn["lens"]:
+        fn_claim["lens"] = fn["lens"]
+    claims = [c for c in (meta, fn_claim) if c]
+    screen = next((c["screen"] for c in claims if c.get("screen")), None) or screen_px
+    lens = None
+    if screen == FISHEYE:
+        settled = next((c for c in claims if "lens" in c), None)
+        if settled is not None:
+            lens = settled["lens"]
+        elif fov:
+            lens = _lens_of(fov)
+    by = next((c for c in claims if c.get("stereo")), None)
+    stereo = by["stereo"] if by else stereo_px
+    rl = bool(by and by.get("rl")) and stereo == SBS
+    return screen, lens, stereo, rl
+
+
+def resolve(fn, screen_px, stereo_px, alpha_px, fov=None, meta=None):
+    """Merge file metadata, filename markers, the watermark FOV and the pixel
+    verdict into the projection tags a scene should carry. fov is
+    ("190"|"200"|"220", vrca); meta a vetted claim from vet_claim()."""
+    screen, lens, stereo, rl = decide(fn, screen_px, stereo_px, fov, meta)
     want = set()
     if alpha_px:
         want.add(ALPHA)
@@ -731,7 +923,7 @@ def resolve(fn, screen_px, stereo_px, alpha_px, fov=None):
     # FLAT already means mono 2D; MONO is only for mono VR (DOME/SPHERE + MONO)
     if stereo and not (screen == FLAT and stereo == MONO):
         want.add(stereo)
-    if fn["rl"] and stereo == SBS:
+    if rl:
         want.add(RL)
     return want
 
@@ -763,18 +955,22 @@ FOV_CROPS = (
 _SLR_RE = re.compile(r"(?<![a-z0-9])(slr|sexlikereal)", re.IGNORECASE)
 
 
-def fov_skip_reason(fn, screen_px, alpha, path):
+def fov_skip_reason(fn, screen_px, alpha, path, meta=None):
     """Why reading the SLR watermark cannot help this scene, or None when it can.
 
     The watermark only names a fisheye lens, so there is nothing to read when
-    the filename already names the lens or the scene does not end up FISHEYE
-    (a filename screen marker beats the pixels). SLR's own passthrough
-    releases carry the watermark, other studios' corner-matte scenes never do,
-    so a matte scene is only read when its path mentions SLR / SexLikeReal.
+    a better source (file metadata, the filename) already names the lens or
+    the scene does not end up FISHEYE (metadata and filename markers beat the
+    pixels). SLR's own passthrough releases carry the watermark, other
+    studios' corner-matte scenes never do, so a matte scene is only read when
+    its path mentions SLR / SexLikeReal.
     """
+    if meta and meta.get("lens"):
+        return "lens from metadata"
     if fn["lens"]:
         return "lens from filename"
-    if (fn["screen"] or screen_px) != FISHEYE:
+    screen, _, _, _ = decide(fn, screen_px, None, None, meta)
+    if screen != FISHEYE:
         return "not fisheye"
     if alpha and not _SLR_RE.search(path or ""):
         return "passthrough not from SLR"
@@ -1009,6 +1205,8 @@ def measure_projection(cfg, scene):
         return None, "file missing"
 
     fn = parse_filename(path)
+    # one cheap ffprobe call before any frame is decoded
+    meta_claim = read_metadata(cfg, path)
     res = probe(cfg, path, w, h, dur)
     if res and fn["alpha_candidate"] and res.get("matte_any"):
         res["matte"] = True
@@ -1021,8 +1219,14 @@ def measure_projection(cfg, scene):
     elif fn["alpha_candidate"] and not alpha:
         why += ", named passthrough/alpha but no corner matte"
 
+    meta, dropped = vet_claim(meta_claim, w, h, res, screen, stereo)
+    if meta_claim:
+        why += f", metadata {meta_claim['raw']}"
+        if dropped:
+            why += " (not trusted: " + "; ".join(dropped) + ")"
+
     fov = None
-    skip = fov_skip_reason(fn, screen, alpha, path) if cfg["readFovWatermark"] else "off"
+    skip = fov_skip_reason(fn, screen, alpha, path, meta) if cfg["readFovWatermark"] else "off"
     if skip is None:
         fov = read_fov(cfg, path, dur)
         if fov:
@@ -1032,7 +1236,7 @@ def measure_projection(cfg, scene):
     marks = [k for k in ("stereo", "screen", "lens") if fn[k]] + (["rl"] if fn["rl"] else [])
     if marks:
         why += ", filename " + "+".join(str(fn[k]) if k != "rl" else "RL" for k in marks)
-    return resolve(fn, screen, stereo, alpha, fov), why
+    return resolve(fn, screen, stereo, alpha, fov, meta), why
 
 
 def process_scene(stash, cfg, scene, ids, mode):

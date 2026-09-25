@@ -142,14 +142,33 @@ the pixels always gives `Alpha`, whatever the other sources say.
      equirect 180 ones included; the downloaded file carries no matte for it.
 
    SLR describes the scene, not necessarily the file you have: a download can
-   be an equirect conversion of a fisheye scene, and some scenes SLR lists as
-   equirect 180 look like a fisheye to the disc test. So SLR's projection
-   has to agree with the frame in coarse shape (fisheye or equirect) and fit
-   the eye the layout leaves, like file metadata; when it does not, the whole
-   answer is set aside, the pixels are kept, and the log says so. Where it
-   agrees, SLR decides 180 vs 360, the lens and passthrough, and the
-   watermark OCR is skipped. The pixel-measured corner matte still stands
-   when SLR says the scene has no alpha.
+   be an equirect conversion of a fisheye scene. So SLR's projection has to
+   agree with the frame in coarse shape (fisheye or equirect) and fit the eye
+   the layout leaves, like file metadata; when it does not, the whole answer
+   is set aside, the pixels are kept, and the log says so. The one
+   exception runs in a single direction:
+   * SLR equirect 180 (`projection` 0, `viewAngle` 180) beats a `FISHEYE`
+     verdict that rests on the disc test alone, without a corner matte:
+     vignetted 180 equirects (a rounded-rectangle picture in black) pass
+     the disc test, and every such disagreement checked by eye was one. The
+     scene gets `DOME` and the log says "SLR equirect 180 over the disc
+     test". A fisheye with the corner matte keeps `FISHEYE`.
+   * SLR fisheye never beats an equirect frame (that is the converted
+     download), and an SLR 360 never beats a fisheye one. A flat or 16:9
+     frame keeps its reading too.
+
+   Where SLR is used it decides 180 vs 360 and passthrough. The lens:
+   * named in `projectionParams.cameraLens`: SLR decides it and the watermark
+     OCR is skipped;
+   * only inferred from `viewAngle` (current 190 degree releases carry no
+     `cameraLens`): SLR's lens holds unless the watermark is read (under the
+     usual skip rules below) and names a different FOV; then the watermark
+     wins and the log says "watermark ... overrides SLR's ... (from
+     viewAngle)". SLR has been seen listing a release with a burned-in
+     "SLR 200° FOV" as `viewAngle` 190.
+
+   The pixel-measured corner matte still stands when SLR says the scene has
+   no alpha.
 
    Politeness: at most one request per second, a User-Agent naming the
    plugin, a 20 s timeout. Answers are cached in `vrQualityTags.slr.json` in
@@ -187,8 +206,8 @@ the pixels always gives `Alpha`, whatever the other sources say.
    releases: near the top of the left eye); both places are read. Nothing measurable separates those lenses, so where the text is
    readable it is the only authority. Up to eight frames are read with
    tesseract and two must agree. The OCR is skipped when it cannot help:
-   * the file metadata, the SLR lookup or the filename already settles the
-     lens;
+   * the file metadata, the filename or the SLR lookup (through
+     `cameraLens`, not an inferred `viewAngle`) already settles the lens;
    * the scene does not end up `FISHEYE` (metadata, the SLR lookup and a
      filename screen marker such as `_180` beat the pixels, so `x_LR_180.mp4` is never read even when the
      pixels say fisheye);
@@ -422,9 +441,16 @@ assigned tags would otherwise never see it.
 * The FOV of a fisheye cannot be measured. Without file metadata, an SLR
   lookup, a filename marker or a readable SLR watermark it stays plain
   `FISHEYE`.
-* The SLR lookup describes the scene on SLR, not your file. Its lens is
-  trusted as given; in a sample of a few dozen scenes one SLR `viewAngle`
-  (190) disagreed with the watermark burned into the file (200).
+* The SLR lookup describes the scene on SLR, not your file. A lens SLR
+  names in `cameraLens` is trusted as given; one inferred from `viewAngle`
+  is checked against the watermark where the watermark is readable.
+* The disc test (fisheye versus 180 equirect) is measured against the
+  inscribed circle of the whole eye, so a vignetted 180 equirect, whose lit
+  area is a rounded rectangle inside black borders, can pass as a fisheye.
+  With the SLR lookup on, SLR's equirect 180 corrects this for SLR scenes;
+  others keep `FISHEYE`. Future work: measure the disc against the lit
+  region's own bounding box (a disc leaves the corners of its bounding box
+  black, a rounded rectangle fills them).
 * Flat 3D outside the path filter is recognised by name only. A title word such
   as "3D" in an ordinary 2D video's name is read as side by side; add
   `VRP: Skip` to such a scene.

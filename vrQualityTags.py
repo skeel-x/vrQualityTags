@@ -18,7 +18,10 @@ WHERE THE ANSWER COMES FROM, IN ORDER OF AUTHORITY
              stereo, and passthrough (native alpha, chroma key). Cached for
              90 days. Its projection must agree with the frame in coarse
              shape (a download can be an equirect conversion of a fisheye
-             scene), otherwise the answer is set aside. See SlrLookup.
+             scene), otherwise the answer is set aside; only SLR's equirect
+             180 beats a disc-only fisheye (vignetted 180s pass the disc
+             test). A lens only inferred from viewAngle yields to the
+             watermark. See SlrLookup, vet_claim().
 
   filename   explicit markers (_LR_, _TB_, _RL_, MKX200, RF52, F180, ...). Most files
              carry none, but when present they are deliberate and beat any
@@ -849,7 +852,7 @@ def _eye_fits(w, h, stereo, screen):
     return False
 
 
-def vet_claim(claim, w, h, res, screen_px, stereo_px):
+def vet_claim(claim, w, h, res, screen_px, stereo_px, disc_yields=False):
     """The part of an outside claim (file metadata, the SLR lookup) that the
     frame does not contradict, and what was dropped and why.
 
@@ -862,6 +865,12 @@ def vet_claim(claim, w, h, res, screen_px, stereo_px):
     layout leaves (a 2:1 side-by-side frame holds two square 180 eyes, never
     a 360). Where the pixels found no projection, the eye shape alone
     decides. A lens only comes with an accepted fisheye projection.
+
+    disc_yields (the SLR lookup): a 180 equirect claim beats a FISHEYE verdict
+    that rests on the disc test alone (no corner matte), because vignetted
+    180 equirects pass that test. Never the other way round: a fisheye claim
+    does not beat an equirect frame (a download can be an equirect
+    conversion of a fisheye scene).
     """
     if not claim:
         return None, []
@@ -878,6 +887,9 @@ def vet_claim(claim, w, h, res, screen_px, stereo_px):
     screen = claim.get("screen")
     if screen:
         layout = out.get("stereo") or stereo_px
+        disc_only = screen_px == FISHEYE and bool(res) and not res.get("matte")
+        if disc_yields and screen == DOME and disc_only:
+            screen_px = None                # checked by eye shape alone below
         if screen_px and _coarse(screen) != _coarse(screen_px):
             dropped.append(f"{screen}, but the frame is {screen_px}")
         elif not _eye_fits(w, h, layout, screen):
@@ -886,6 +898,8 @@ def vet_claim(claim, w, h, res, screen_px, stereo_px):
             out["screen"] = screen
             if "lens" in claim:
                 out["lens"] = claim["lens"]
+                if claim.get("lens_inferred") is not None:
+                    out["lens_inferred"] = claim["lens_inferred"]
     final = out.get("screen") or screen_px
     if out.get("stereo") and final in (DOME, SPHERE, FISHEYE) and \
             not _eye_fits(w, h, out["stereo"], final):
@@ -905,7 +919,8 @@ def decide(fn, screen_px, stereo_px, fov=None, meta=None, slr=None):
     file metadata and the SLR lookup (both vetted, see vet_claim()), filename
     markers, the watermark FOV, the pixels. A source that names a lens names
     a fisheye; one that settles the lens (the SLR lookup of a 180 fisheye
-    names none) settles it for every source below."""
+    names none) settles it for every source below, except that the watermark
+    beats a lens SLR only inferred from its viewAngle."""
     fn_claim = {"screen": FISHEYE if fn["lens"] else fn["screen"],
                 "stereo": fn["stereo"], "rl": fn["rl"]}
     if fn["lens"]:
@@ -915,7 +930,7 @@ def decide(fn, screen_px, stereo_px, fov=None, meta=None, slr=None):
     lens = None
     if screen == FISHEYE:
         settled = next((c for c in claims if "lens" in c), None)
-        if settled is not None:
+        if settled is not None and not (fov and settled.get("lens_inferred")):
             lens = settled["lens"]
         elif fov:
             lens = _lens_of(fov)
@@ -990,7 +1005,7 @@ def fov_skip_reason(fn, screen_px, alpha, path, meta=None, slr=None):
     """
     if meta and meta.get("lens"):
         return "lens from metadata"
-    if slr and "lens" in slr:
+    if slr and "lens" in slr and not slr.get("lens_inferred"):
         return "lens from SLR"
     if fn["lens"]:
         return "lens from filename"
@@ -1118,7 +1133,8 @@ def slr_claim(data):
     Projection: projectionParams.projection (0 equirect, 1 fisheye), else the
     top-level projection (0 equirect, 4 fisheye), else a "Fisheye" category.
     viewAngle 360 is a 360 equirect, otherwise a 180. The lens comes from
-    projectionParams.cameraLens, else from viewAngle 190 / 200 / 220.
+    projectionParams.cameraLens, else from viewAngle 190 / 200 / 220
+    (lens_inferred: the watermark, when readable, beats such a lens).
     Stereo from stereomode (sbs2l, sbs2r, ab2l, mono), else from
     projectionParams.format (1 top/bottom, 2 side by side).
     Passthrough: alpha.enabled (SLR's category "Passthrough (Native)") is the
@@ -1144,7 +1160,12 @@ def slr_claim(data):
     if fisheye:
         out["screen"] = FISHEYE
         lens_name = str(pp.get("cameraLens") or "").lower()
-        out["lens"] = _SLR_LENS.get(lens_name) or _SLR_ANGLE_LENS.get(angle)
+        out["lens"] = _SLR_LENS.get(lens_name)
+        # a lens only inferred from viewAngle can be wrong (a 200 degree
+        # release listed as 190): the watermark may still correct it
+        out["lens_inferred"] = out["lens"] is None
+        if out["lens_inferred"]:
+            out["lens"] = _SLR_ANGLE_LENS.get(angle)
         raw.append("fisheye" + (f" {lens_name}" if lens_name else ""))
     elif fisheye is False or angle:
         is360 = angle == 360 or (not angle and "360°" in cats)
@@ -1456,7 +1477,8 @@ def ensure_tags(stash, cfg):
 
 def lookup_slr(cfg, scene, w, h, res, screen_px, stereo_px):
     """(vetted SLR claim or None, text for the log line). SLR's projection has
-    to agree with the frame in coarse shape (and fit the eye); when it does
+    to agree with the frame in coarse shape (and fit the eye), except that an
+    equirect 180 beats a disc-only fisheye (see vet_claim()); when it does
     not, the whole answer is set aside and the pixels are kept."""
     lookup = cfg.get("_slr")
     ref = slr_scene_ref(scene.get("urls")) if lookup else None
@@ -1465,8 +1487,10 @@ def lookup_slr(cfg, scene, w, h, res, screen_px, stereo_px):
     claim = slr_claim(lookup.scene(ref))
     if not claim:
         return None, ""
-    vetted, dropped = vet_claim(claim, w, h, res, screen_px, stereo_px)
+    vetted, dropped = vet_claim(claim, w, h, res, screen_px, stereo_px, disc_yields=True)
     why = f", SLR {ref[0]} {claim['raw']}"
+    if screen_px == FISHEYE and vetted.get("screen") == DOME:
+        why += " (SLR equirect 180 over the disc test)"
     if claim.get("screen") and "screen" not in vetted:
         log("i", f"scene {scene.get('id')}: SLR {ref[0]} says {claim['raw']}, which the frame "
                  f"contradicts ({'; '.join(dropped)}); kept the pixels")
@@ -1520,6 +1544,8 @@ def measure_projection(cfg, scene):
         fov = read_fov(cfg, path, dur)
         if fov:
             why += f", watermark {fov[0]}deg"
+            if slr and slr.get("lens_inferred") and _lens_of(fov) != slr.get("lens"):
+                why += f" overrides SLR's {slr.get('lens') or 'no lens'} (from viewAngle)"
     elif skip == "passthrough not from SLR":
         why += ", watermark not read (passthrough not from SLR)"
     marks = [k for k in ("stereo", "screen", "lens") if fn[k]] + (["rl"] if fn["rl"] else [])

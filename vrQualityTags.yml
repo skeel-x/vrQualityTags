@@ -14,7 +14,7 @@ settings:
     type: BOOLEAN
   slrLookup:
     displayName: Look up SexLikeReal scenes
-    description: For scenes with a sexlikereal.com scene URL, ask SLR's API for 180 vs 360, the fisheye lens, the stereo layout and passthrough (Alpha, Chroma Key). One request per second at most, answers cached for 90 days in vrQualityTags.slr.json next to the plugin. SLR's answer is only used where it agrees with the frame in coarse shape (fisheye or equirect); it then replaces the watermark OCR. Default off.
+    description: For scenes with a sexlikereal.com scene URL, ask SLR's API for 180 vs 360, the fisheye lens, the stereo layout and passthrough (Alpha, Chroma Key). One request per second at most, answers cached for 90 days in vrQualityTags.slr.json next to the plugin. SLR's answer is only used where it agrees with the frame in coarse shape (fisheye or equirect), except that SLR's equirect 180 beats a fisheye reading from the disc test alone. A lens SLR names explicitly replaces the watermark OCR; one only inferred from the view angle yields to a readable watermark. Default off.
     type: BOOLEAN
   overwrite:
     displayName: Re-measure already-tagged scenes

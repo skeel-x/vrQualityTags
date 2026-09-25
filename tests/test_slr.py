@@ -70,6 +70,11 @@ class Claim(unittest.TestCase):
     def test_rf52_from_the_view_angle(self):
         got = self.claim("slr_rf52.json")
         self.assertEqual((got["screen"], got["lens"], got["alpha"]), (v.FISHEYE, v.RF52, False))
+        # only inferred from viewAngle: the watermark may still correct it
+        self.assertTrue(got["lens_inferred"])
+        self.assertFalse(self.claim("slr_mkx200.json")["lens_inferred"])
+        self.assertTrue(self.claim("slr_fisheye_180.json")["lens_inferred"])
+        self.assertNotIn("lens_inferred", self.claim("slr_180.json"))
 
     def test_native_alpha(self):
         got = self.claim("slr_rf52_alpha.json")
@@ -339,28 +344,56 @@ URL = "https://www.sexlikereal.com/scenes/a-title-1001"
 
 
 class LookupSlr(unittest.TestCase):
-    def run_lookup(self, data, screen_px, stereo_px=v.SBS, w=5800, h=2900, urls=(URL,)):
+    def run_lookup(self, data, screen_px, stereo_px=v.SBS, w=5800, h=2900, urls=(URL,),
+                   res=PAIR):
         c = cfg(slrLookup=True)
         c["_slr"] = StaticLookup(data)
         with mock.patch.object(v, "log") as log:
-            got = v.lookup_slr(c, {"id": "9", "urls": list(urls)}, w, h, PAIR,
+            got = v.lookup_slr(c, {"id": "9", "urls": list(urls)}, w, h, res,
                                screen_px, stereo_px)
         return got, log
 
     def test_agreeing_answer(self):
         (got, why), log = self.run_lookup(fixture("slr_rf52_alpha.json")["data"], v.FISHEYE)
         self.assertEqual(got, {"stereo": v.SBS, "rl": False, "screen": v.FISHEYE,
-                               "lens": v.RF52, "alpha": True, "chroma": False})
+                               "lens": v.RF52, "lens_inferred": True, "alpha": True,
+                               "chroma": False})
         self.assertEqual(why, ", SLR 1001 viewAngle 190, fisheye, sbs2l, alpha")
         log.assert_not_called()
 
-    def test_coarse_shape_disagreement_keeps_the_pixels(self):
+    def test_equirect_180_beats_a_disc_only_fisheye(self):
+        # the disc test takes vignetted 180 equirects for fisheye
         (got, why), log = self.run_lookup(fixture("slr_180.json")["data"], v.FISHEYE)
+        self.assertEqual(got["screen"], v.DOME)
+        self.assertIn("SLR equirect 180 over the disc test", why)
+        log.assert_not_called()
+
+    def test_equirect_180_does_not_beat_a_matte_fisheye(self):
+        (got, why), log = self.run_lookup(fixture("slr_180.json")["data"], v.FISHEYE,
+                                          res=dict(PAIR, matte=True))
         self.assertIsNone(got)
         self.assertIn("contradicts the frame", why)
         self.assertIn("kept the pixels", log.call_args[0][1])
-        # nor does a fisheye answer turn an equirect file into one (a converted release)
-        (got, _), _ = self.run_lookup(fixture("slr_mkx200.json")["data"], v.DOME)
+
+    def test_360_does_not_beat_a_disc_fisheye(self):
+        data = dict(fixture("slr_180.json")["data"], viewAngle=360)
+        data["projectionParams"] = dict(data["projectionParams"], viewAngle=360)
+        (got, _), _ = self.run_lookup(data, v.FISHEYE)
+        self.assertIsNone(got)
+
+    def test_fisheye_never_beats_a_pixel_equirect(self):
+        # a download can be an equirect conversion of a fisheye scene
+        (got, why), _ = self.run_lookup(fixture("slr_mkx200.json")["data"], v.DOME)
+        self.assertIsNone(got)
+        self.assertIn("contradicts the frame", why)
+
+    def test_flat_frame_still_wins(self):
+        (got, _), _ = self.run_lookup(fixture("slr_180.json")["data"], v.FLAT, v.MONO,
+                                      w=1920, h=1080)
+        self.assertIsNone(got)
+        # unresolved 16:9 frame whose halves do not match: no 180 eye in it
+        (got, _), _ = self.run_lookup(fixture("slr_180.json")["data"], None, None,
+                                      w=1280, h=720, res={"lr": 0.1, "tb": 0.1})
         self.assertIsNone(got)
 
     def test_off_or_no_url(self):
@@ -376,16 +409,27 @@ class Authority(unittest.TestCase):
     NONE = v.parse_filename("plain.mp4")
 
     def slr(self, name, screen_px=v.FISHEYE):
-        data = fixture(name)["data"]
-        claim = v.slr_claim(data)
-        vetted, _ = v.vet_claim(claim, 5800, 2900, PAIR, screen_px, v.SBS)
-        vetted.update(alpha=claim["alpha"], chroma=claim["chroma"])
+        c = cfg(slrLookup=True)
+        c["_slr"] = StaticLookup(fixture(name)["data"])
+        with mock.patch.object(v, "log"):
+            vetted, _ = v.lookup_slr(c, {"id": "9", "urls": [URL]}, 5800, 2900, PAIR,
+                                     screen_px, v.SBS)
         return vetted
 
-    def test_slr_lens_beats_filename_and_watermark(self):
-        fn = v.parse_filename("x_MKX200.mp4")
+    def test_explicit_slr_lens_beats_filename_and_watermark(self):
+        fn = v.parse_filename("x_RF52.mp4")
         self.assertEqual(v.resolve(fn, v.FISHEYE, v.SBS, False, ("220", False), None,
-                                   self.slr("slr_rf52.json")),
+                                   self.slr("slr_mkx200.json")),
+                         {v.FISHEYE, v.MKX200, v.SBS})
+
+    def test_inferred_slr_lens_yields_to_the_watermark(self):
+        # recorded: viewAngle 190 without cameraLens, the file says "SLR 200° FOV"
+        slr = self.slr("slr_190_watermark_200.json")
+        self.assertEqual(v.resolve(self.NONE, v.FISHEYE, v.SBS, False, ("200", False), None, slr),
+                         {v.FISHEYE, v.MKX200, v.SBS})
+        # no readable watermark: SLR's lens stands, and it beats the filename
+        fn = v.parse_filename("x_MKX220.mp4")
+        self.assertEqual(v.resolve(fn, v.FISHEYE, v.SBS, False, None, None, slr),
                          {v.FISHEYE, v.RF52, v.SBS})
 
     def test_metadata_beats_slr(self):
@@ -396,8 +440,11 @@ class Authority(unittest.TestCase):
 
     def test_180_fisheye_has_no_lens(self):
         slr = self.slr("slr_fisheye_180.json")
-        self.assertEqual(v.resolve(self.NONE, v.FISHEYE, v.SBS, False, ("200", False), None, slr),
+        self.assertEqual(v.resolve(self.NONE, v.FISHEYE, v.SBS, False, None, None, slr),
                          {v.FISHEYE, v.SBS})
+        # inferred from viewAngle 180 too, so a readable watermark still counts
+        self.assertEqual(v.resolve(self.NONE, v.FISHEYE, v.SBS, False, ("200", False), None, slr),
+                         {v.FISHEYE, v.MKX200, v.SBS})
 
     def test_alpha_and_chroma(self):
         self.assertIn(v.ALPHA, v.resolve(self.NONE, v.FISHEYE, v.SBS, False, None, None,
@@ -409,13 +456,23 @@ class Authority(unittest.TestCase):
         slr["chroma"] = True
         self.assertIn(v.CHROMA, v.resolve(self.NONE, v.FISHEYE, v.SBS, False, None, None, slr))
 
-    def test_watermark_skipped(self):
+    def test_watermark_skipped_only_for_an_explicit_lens(self):
         path = "/m/SLR/x.mp4"
         fn = v.parse_filename(path)
         self.assertEqual(v.fov_skip_reason(fn, v.FISHEYE, False, path, None,
-                                           self.slr("slr_fisheye_180.json")), "lens from SLR")
+                                           self.slr("slr_mkx200.json")), "lens from SLR")
+        self.assertIsNone(v.fov_skip_reason(fn, v.FISHEYE, False, path, None,
+                                            self.slr("slr_rf52.json")))
+        self.assertIsNone(v.fov_skip_reason(fn, v.FISHEYE, False, path, None,
+                                            self.slr("slr_fisheye_180.json")))
+        # the existing skip rules still apply
+        other = "/m/A/Studio - X [Passthrough].mp4"
+        self.assertEqual(v.fov_skip_reason(v.parse_filename(other), v.FISHEYE, True, other,
+                                           None, self.slr("slr_rf52.json")),
+                         "passthrough not from SLR")
+        # an SLR 180 equirect over a disc-only fisheye: nothing to read
         self.assertEqual(v.fov_skip_reason(fn, v.FISHEYE, False, path, None,
-                                           self.slr("slr_rf52.json")), "lens from SLR")
+                                           self.slr("slr_180.json")), "not fisheye")
 
 
 class MeasureWithSlr(unittest.TestCase):
@@ -423,7 +480,7 @@ class MeasureWithSlr(unittest.TestCase):
            "alpha_lower": 0.0, "matte_red": 0.0, "matte_black": 0.95, "matte": False,
            "wrap": None, "wrap_tb": None, "frames": 2}
 
-    def measure(self, data, res=None, **kw):
+    def measure(self, data, res=None, fov=("200", False), **kw):
         c = cfg(slrLookup=True, **kw)
         c["_slr"] = StaticLookup(data)
         sc = {"id": "1", "tags": [], "urls": [URL],
@@ -432,20 +489,42 @@ class MeasureWithSlr(unittest.TestCase):
         with mock.patch.object(v.os.path, "exists", return_value=True), \
                 mock.patch.object(v, "read_metadata", return_value=None), \
                 mock.patch.object(v, "probe", return_value=res or self.RES), \
-                mock.patch.object(v, "read_fov", return_value=("200", False)) as fov, \
+                mock.patch.object(v, "read_fov", return_value=fov) as read_fov, \
                 mock.patch.object(v, "log"):
             want, why = v.measure_projection(c, sc)
-        return want, why, fov
+        return want, why, read_fov
 
-    def test_slr_decides_the_lens_and_the_ocr_is_skipped(self):
-        want, why, fov = self.measure(fixture("slr_rf52.json")["data"])
-        self.assertEqual(want, {v.FISHEYE, v.RF52, v.SBS})
+    def test_explicit_slr_lens_skips_the_ocr(self):
+        want, why, fov = self.measure(fixture("slr_mkx200.json")["data"], fov=("190", False))
+        self.assertEqual(want, {v.FISHEYE, v.MKX200, v.SBS})
         fov.assert_not_called()
         self.assertIn("SLR 1001", why)
 
-    def test_disagreement_falls_back_to_the_watermark(self):
-        want, why, fov = self.measure(fixture("slr_180.json")["data"])
+    def test_watermark_overrides_an_inferred_slr_lens(self):
+        # the recorded case: SLR viewAngle 190, burned-in "SLR 200° FOV"
+        want, why, fov = self.measure(fixture("slr_190_watermark_200.json")["data"])
         self.assertEqual(want, {v.FISHEYE, v.MKX200, v.SBS})
+        fov.assert_called_once()
+        self.assertIn("watermark 200deg overrides SLR's RF52 (from viewAngle)", why)
+
+    def test_agreeing_or_unreadable_watermark_keeps_the_slr_lens(self):
+        want, why, _ = self.measure(fixture("slr_190_watermark_200.json")["data"],
+                                    fov=("190", False))
+        self.assertEqual(want, {v.FISHEYE, v.RF52, v.SBS})
+        self.assertNotIn("overrides", why)
+        want, _, _ = self.measure(fixture("slr_190_watermark_200.json")["data"], fov=None)
+        self.assertEqual(want, {v.FISHEYE, v.RF52, v.SBS})
+
+    def test_slr_180_equirect_beats_a_disc_only_fisheye(self):
+        want, why, fov = self.measure(fixture("slr_180.json")["data"])
+        self.assertEqual(want, {v.DOME, v.SBS})
+        fov.assert_not_called()
+        self.assertIn("over the disc test", why)
+
+    def test_matte_fisheye_keeps_the_pixels(self):
+        res = dict(self.RES, matte=True, matte_red=0.05)
+        want, why, fov = self.measure(fixture("slr_180.json")["data"], res=res)
+        self.assertEqual(want, {v.FISHEYE, v.MKX200, v.SBS, v.ALPHA})
         fov.assert_called_once()
         self.assertIn("not used", why)
 
@@ -455,7 +534,7 @@ class MeasureWithSlr(unittest.TestCase):
         self.assertNotIn("SLR 1001", why)
 
     def test_native_alpha_adds_the_tag(self):
-        want, _, _ = self.measure(fixture("slr_rf52_alpha.json")["data"])
+        want, _, _ = self.measure(fixture("slr_rf52_alpha.json")["data"], fov=None)
         self.assertEqual(want, {v.FISHEYE, v.RF52, v.SBS, v.ALPHA})
 
 

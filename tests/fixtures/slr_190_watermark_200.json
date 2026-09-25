@@ -1,0 +1,42 @@
+{
+  "data": {
+    "categories": [
+      {
+        "id": 1,
+        "name": "Fisheye"
+      },
+      {
+        "id": 2,
+        "name": "190°"
+      },
+      {
+        "id": 3,
+        "name": "Passthrough AI"
+      },
+      {
+        "id": 4,
+        "name": "Passthrough"
+      }
+    ],
+    "id": 1007,
+    "passthrough": {
+      "aiAlpha": {
+        "enabled": true
+      },
+      "alpha": {
+        "enabled": false
+      },
+      "chromaKey": {
+        "enabled": false
+      }
+    },
+    "projection": 4,
+    "projectionParams": {
+      "format": 2,
+      "projection": 1,
+      "viewAngle": 190
+    },
+    "stereomode": "sbs2l",
+    "viewAngle": 190
+  }
+}

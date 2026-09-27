@@ -148,3 +148,43 @@ def upscale2(buf, w, h):
             b = r1[x0] + (r1[x1] - r1[x0]) * tx
             out[y * big_w + x] = int(a + (b - a) * ty + 0.5)
     return bytes(out)
+
+
+# ------------------------------------------------------------ stereo (grey)
+
+def value_noise(seed=0, cell=12):
+    """A smooth random picture as a function f(x, y) -> 30..220 of real
+    coordinates: random values on a grid every `cell` pixels, interpolated
+    with a smoothstep, so it can be sampled at sub-pixel shifts."""
+    def at(i, j):
+        return 30 + noise(i, j, seed) * 190 / 220
+
+    def f(x, y):
+        gx, gy = x / cell, y / cell
+        i, j = math.floor(gx), math.floor(gy)
+        tx, ty = gx - i, gy - j
+        tx, ty = tx * tx * (3 - 2 * tx), ty * ty * (3 - 2 * ty)
+        a = at(i, j) + (at(i + 1, j) - at(i, j)) * tx
+        b = at(i, j + 1) + (at(i + 1, j + 1) - at(i, j + 1)) * tx
+        return a + (b - a) * ty
+    return f
+
+
+def stereo_pair(ew, eh, shift, seed=0, layout="SBS"):
+    """A grey stereo frame of two ew x eh eyes (side by side, or top/bottom)
+    of one smooth random picture. shift(x, y) -> (dx, dy) is where the right
+    eye shows what the left eye shows at (x, y), minus (x, y): the right
+    eye at (x, y) samples the picture at (x - dx, y - dy), with the shift
+    taken at the right eye's pixel (fine for smooth shift fields)."""
+    f = value_noise(seed)
+    left = [bytes(int(f(x, y) + 0.5) for x in range(ew)) for y in range(eh)]
+    right = []
+    for y in range(eh):
+        row = bytearray(ew)
+        for x in range(ew):
+            dx, dy = shift(x, y)
+            row[x] = int(f(x - dx, y - dy) + 0.5)
+        right.append(bytes(row))
+    if layout == "SBS":
+        return b"".join(a + b for a, b in zip(left, right))
+    return b"".join(left) + b"".join(right)

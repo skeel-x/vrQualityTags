@@ -209,7 +209,7 @@ class ProcessScene(unittest.TestCase):
     def run_scene(self, sc, verdict="unset", mode="untagged", ids=IDS, **kw):
         stash, seen = FakeStash(), []
 
-        def measure(c, s, detail=None):
+        def measure(c, s, detail=None, align=None):
             seen.append(detail)
             if detail is not None and verdict != "unset":
                 detail["verdict"] = verdict

@@ -1,6 +1,6 @@
 name: VR Quality Tags
-description: Companion to stash-vr. Measures each VR file and tags its projection, fisheye lens, stereo layout, eye order and passthrough alpha matte, plus a measured quality tier and Low Detail for files without the detail of their resolution, using the file's own metadata and (optionally) SexLikeReal's scene data where the picture agrees with them. Flat 3D files are recognised by name.
-version: 2.6.0
+description: Companion to stash-vr. Measures each VR file and tags its projection, fisheye lens, stereo layout, eye order and passthrough alpha matte, plus a measured quality tier and Low Detail for files without the detail of their resolution, and the vertical offset between the eyes of stereo scenes (custom field vr_vertical_offset), using the file's own metadata and (optionally) SexLikeReal's scene data where the picture agrees with them. Flat 3D files are recognised by name.
+version: 2.7.0
 url: https://github.com/skeel-x/vrQualityTags
 
 settings:
@@ -80,6 +80,10 @@ settings:
     displayName: Tag Low Detail
     description: When a scene is measured and earns a quality tier, also judge whether the file carries the detail its resolution claims, from a native-resolution crop of the two measured frames (no extra decode). An upscale gets Low Detail next to its tier tag, and so does a middling file whose bitrate is below 0.8 bit per pixel and second (about 27 Mbit/s at 8192x4096). Scenes that are not measured keep what their last measurement decided. Default on; switched off, the tag is removed.
     type: BOOLEAN
+  detectVerticalOffset:
+    displayName: Measure stereo alignment
+    description: When a stereo 180 or fisheye scene is measured, also measure how far one eye sits above the other (four keyframes, two of them shared with the projection measurement) and store it in the scene custom field vr_vertical_offset, in degrees (positive - the right eye's picture sits lower). stash-vr uses it to straighten the eyes in HereSphere. Stored only when at least three frames agree; otherwise, and for mono, flat and 360 scenes, the field is removed. No other custom field is touched. Needs a Stash with scene custom fields (v0.31). Default on; switched off, nothing is measured and stored values are left as they are.
+    type: BOOLEAN
 
 exec:
   - python
@@ -96,6 +100,10 @@ tasks:
     description: Only judge whether each scene with a quality tier carries the detail of its resolution, and add or remove Low Detail. No other tag is touched and no projection, lens or SLR lookup is done, so it is much faster than a retag. Resumable like the retag (its own progress file).
     defaultArgs:
       mode: detail
+  - name: Measure stereo alignment of all VR scenes
+    description: Only measure the vertical offset between the eyes of each scene that already has a projection tag and set or remove its custom field vr_vertical_offset. The layout, eye order and lens come from the scene's tags; no tag and no other custom field is touched. Resumable like the retag (its own progress file).
+    defaultArgs:
+      mode: alignment
   - name: Re-measure and retag all VR scenes
     description: Ignore existing tags, measure everything again and replace every tag this plugin manages. Resumable - an interrupted run (stopped, restarted, or ended by an expired session) continues after the last scene it finished when run again within 7 days.
     defaultArgs:
@@ -109,7 +117,7 @@ tasks:
     defaultArgs:
       mode: tidy_mono
   - name: Remove all managed tags
-    description: Detach every tag this plugin manages from the matching scenes. The tags themselves are kept.
+    description: Detach every tag this plugin manages from the matching scenes and remove their vr_vertical_offset custom field. The tags themselves are kept.
     defaultArgs:
       mode: clear
 

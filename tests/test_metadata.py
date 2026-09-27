@@ -263,7 +263,7 @@ class MeasureWithMetadata(unittest.TestCase):
                 mock.patch.object(v, "read_metadata",
                                   side_effect=lambda *a: order.append("meta") or claim), \
                 mock.patch.object(v, "probe",
-                                  side_effect=lambda *a: order.append("probe") or self.RES):
+                                  side_effect=lambda *a, **k: order.append("probe") or self.RES):
             got = v.measure_projection(cfg(), sc)
         return got, order
 

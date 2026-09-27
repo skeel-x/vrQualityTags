@@ -2,9 +2,12 @@
 
 A [Stash](https://github.com/stashapp/stash) plugin that measures your VR files
 and tags what they actually are: projection, fisheye lens, stereo layout, eye
-order, the passthrough alpha matte, and a quality tier. It is the companion to
+order, the passthrough alpha matte, and a quality tier. It also measures how
+far one eye sits above the other in a stereo scene and stores that in a scene
+custom field. It is the companion to
 [stash-vr](https://github.com/skeel-x/stash-vr), whose video rules turn these
-tags into the right player settings in HereSphere and DeoVR.
+tags into the right player settings in HereSphere and DeoVR, and which uses
+the offset to straighten the eyes in HereSphere.
 
 Most VR files carry no usable metadata: spherical metadata is rare (and often
 wrong where it exists), filenames rarely say anything, and the container
@@ -17,7 +20,9 @@ they exist.
 ## Requirements
 
 * Stash v0.24 or later (plugin sources); the plugin itself only needs Stash's
-  plugin tasks and hooks.
+  plugin tasks and hooks. The stereo alignment needs scene custom fields
+  (Stash v0.31 has them); on a Stash without them it is skipped with a
+  warning and everything else works as before.
 * Python 3 as Stash's plugin interpreter. Standard library only: no numpy, no
   PIL, no pip installs.
 * `ffmpeg` and `ffprobe` on the Stash host (defaults `/usr/bin/ffmpeg`,
@@ -65,6 +70,7 @@ effect in the headset. Tags outside this table are never added or removed.
 | a tier file without the detail of its resolution (upscale, starved bitrate) | `Low Detail`, next to the tier tag (see [Honest resolution](#honest-resolution)) |
 | probed, not recognised | `VRP: Unresolved` |
 | your opt-out | `VRP: Skip`: add it to a scene and the plugin never touches that scene |
+| vertical offset between the eyes of a stereo 180 or fisheye scene | the scene custom field `vr_vertical_offset`, in degrees (see [Stereo alignment](#stereo-alignment)) |
 
 `FLAT` means an ordinary 2D video; `MONO` is only used for mono VR. A scene
 without any projection tag also plays flat in stash-vr, which is why files
@@ -385,6 +391,13 @@ whose clips mix formats is left without `Alpha` because both frames must agree.
   No other tag is touched and there is no projection measurement, watermark
   OCR or SLR lookup, so it is the quick way to judge an existing library.
   Resumable like the retag, with its own `vrQualityTags.detail-state.json`.
+* **Measure stereo alignment of all VR scenes**: for every scene the retag
+  would visit that already has a projection tag, measures only the vertical
+  offset between the eyes and sets or removes `vr_vertical_offset` (see
+  [Stereo alignment](#stereo-alignment)). The projection, stereo layout, eye
+  order and lens are taken from the scene's tags; no tag and no other custom
+  field is touched, and a scene without a projection tag is skipped. Resumable
+  like the retag, with its own `vrQualityTags.alignment-state.json`.
 * **Remove stray MONO tags**: removes `MONO` from every scene, anywhere in the
   library, that carries no VR projection tag (`DOME`, `SPHERE`, `FISHEYE`, a
   lens tag, `CUBEMAP` or `EAC`). `MONO` only sets the stereo mode of a VR
@@ -392,14 +405,14 @@ whose clips mix formats is left without `Alpha` because both frames must agree.
   `FLAT`) it means nothing. Nothing is decoded. The two tagging tasks (and the
   retag restart) do the same after their own pass, so a scene they have just
   measured already carries its measured tags; the log gives the count.
-* **Remove all managed tags**: detaches the managed tags; the tags themselves
-  are kept.
+* **Remove all managed tags**: detaches the managed tags (the tags themselves
+  are kept) and removes `vr_vertical_offset` from the matching scenes.
 * **Tag on scan** (hook on scene create and update): the "untagged" logic for
-  one scene. Updates that only changed tags are ignored, so the plugin's own
-  writes do not trigger it again.
+  one scene. Updates that only changed tags or custom fields are ignored, so
+  the plugin's own writes do not trigger it again.
 
 Task progress is reported to Stash after every scene. Writes are idempotent: a
-scene whose tags are already right is not written to.
+scene whose tags and offset are already right is not written to.
 `VRP: Skip` makes every task and the hook leave a scene alone.
 
 ## Settings
@@ -419,11 +432,12 @@ scene whose tags are already right is not written to.
 | 8K/7K/6K minimum width | 7680, 7000, 5760 | tier boundaries |
 | 6K minimum bitrate (Mbit/s) | 40 | a 6K file below this is treated as an upscale |
 | Tag Low Detail | on | judge whether a tier file carries the detail of its resolution and tag `Low Detail` when it does not (see [Honest resolution](#honest-resolution)); off removes the tag |
+| Measure stereo alignment | on | measure the vertical offset between the eyes of stereo scenes into `vr_vertical_offset` (see [Stereo alignment](#stereo-alignment)); off measures nothing and leaves stored values as they are |
 | Stash API key (for long tasks) | empty | Stash ends a plugin task's session after an hour, so a full retag of a large library stops part way with `401 Unauthorized`. Paste your API key (*Settings -> Security*) and the plugin authenticates with it instead. |
 
 Stash shows an untouched on/off setting as off; the plugin treats an untouched
 setting as its default (on for the watermark, the VR-shaped check, the flat
-3D check and Low Detail). Switch it
+3D check, Low Detail and the stereo alignment). Switch it
 on and off once to store an explicit value.
 
 ## Quality tiers
@@ -527,6 +541,132 @@ table were taken before the floor became a tie-breaker: then it also tagged
 one clearly sharp file (an SLR Originals scene at 21.5 Mbit/s, ratio 0.18),
 which the 0.12 limit now spares.
 
+## Stereo alignment
+
+In some releases one eye sits a few pixels higher than the other. The picture
+looks fine on a monitor, but in the headset the eyes have to diverge
+vertically to fuse it, which strains within minutes. A player can undo it by
+tilting one eye by the same angle. The plugin measures that offset for every
+stereo 180 and fisheye scene (`DOME` or `FISHEYE` with `SBS` or `TB`) and
+stores it in the scene custom field **`vr_vertical_offset`**, in degrees with
+two decimals. [stash-vr](https://github.com/skeel-x/stash-vr) reads it and
+serves HereSphere a profile with *Alignment Rotation Pitch* set to the value,
+so the scene opens corrected. For that HereSphere must load the server's
+profiles by itself: enable **Always Load HSP** in the settings (cogwheel) of
+HereSphere's web API.
+
+**Sign.** The offset is the right eye's position minus the left eye's, with
+image y pointing down: positive means the right eye's picture sits lower.
+Degrees are pixels times 180 / eye width for a 180 equirect, and times half
+the lens FOV / half the disc diameter for a fisheye. HereSphere's pitch takes
+the value as it is (checked in the headset on two scenes: -0.84 and +0.91
+both look right with the pitch set to the stored value).
+
+**The measure.** Keyframes are scaled so that each eye is 1024 px wide (area
+averaging, grey). Tiles of 64 x 64 px every 48 px in the central 60 % of the
+left eye (equirect), or within half the disc radius (fisheye), are kept when
+they are textured in both directions (standard deviation >= 10, mean >= 20,
+mean luma step down and across >= 2; a purely vertical edge says nothing
+about a vertical shift). Each is searched for in the right eye over +-60 px
+sideways (the parallax) and +-16 px up and down: first at a quarter of the
+size, where the match must also be unique (every shift more than one step
+from the peak at least 0.04 lower, which rejects repetitive texture), then at
+full size within +-3 px of that answer, where the normalised correlation must
+reach 0.85 and a parabola through the neighbours gives the sub-pixel shift.
+The correlations come from one big-integer multiplication per tile and
+level: pure Python, but fast.
+
+A near object away from the centre lines has a real vertical disparity in an
+equirect or fisheye picture (about 12 px for something 0.7 m away at 45
+degrees left and down), which the headset reproduces correctly. So the plain
+median of the vertical shifts is not the offset. The plugin fits
+
+    dy = c0 + c1 * x + g * rho * dx + h * rho
+
+per frame, where `rho * dx` is the vertical parallax a purely horizontal
+baseline gives a point with horizontal disparity `dx` at that spot of the
+projection, and `x` the distance from the centre. Four rounds drop tiles more
+than 3 MADs (at least 0.75 px) off the fit. `c0` is the offset; `c1` is a
+relative roll of the eyes (logged, not stored).
+
+**When it is known.** A frame counts with at least 15 matched tiles and a
+standard error of `c0` of at most 0.35 px. The scene's frames are the two
+keyframes the projection measurement decodes anyway (40 % and 60 % of the
+duration) and two more at 20 % and 80 %, which spread the sample over the
+scene; when exactly one frame is missing for a count of three, 30 % and then
+70 % stand in. The offset is known when
+
+* at least 3 frames count,
+* their `c0` lie within 1 px of each other (0.18 degrees at 180 degrees
+  per 1024 px),
+* the offset does not grow with nearness: a second fit with a term `k * dx`
+  gives how much more the nearest tiles are shifted than the farthest; the
+  median of that over the frames must stay within 2 px. Cameras mounted at
+  different heights show this way, and then no single tilt suits both the
+  subject and the room,
+* and the mean is at most 2 degrees (more is a layout or projection error).
+
+Then the mean of the frames, in degrees, is stored, including `0.00` for a
+well aligned scene. Otherwise the scene is unknown.
+
+**Stored.** Known: `vr_vertical_offset` is set. Unknown, or the scene is not
+a stereo 180 or fisheye pair (mono, flat, 360): the field is removed. Nothing
+decoded (the file is missing, the projection is `VRP: Unresolved`): the field
+is left as it is. No other custom field is ever touched, and a scene whose
+field already holds the value is not written to. The field is measured
+whenever a scene is measured (a new scene, the untagged task for scenes
+without a projection tag, a retag) and by *Measure stereo alignment of all
+VR scenes*; with the setting off nothing is measured and stored values stay.
+
+**Validation.** A survey of 213 scenes (2 keyframes each at 35 % and 65 %,
+measured with OpenCV) came first; the plugin's pure-Python measure was run on
+the same frames, with the survey's two-frame rule since those are all the
+frames it kept (the three-frame rule is exercised by the unit tests and by
+the real files in the last column). On the 70 scenes both call known (both
+frames counting and agreeing), the two differ by 0.008 degrees median, 0.04 at the 90th
+percentile and 0.09 at most; frame by frame (240 frames) by 0.012 median,
+0.05 at the 90th percentile, 0.18 at most. Selected scenes:
+
+| Scene | Projection | Survey | Plugin, survey frames | Plugin, its own 3 to 4 frames |
+|---|---|---|---|---|
+| 12851 | 180 SBS | +0.91 | +0.91 | +0.89 |
+| 14106 | 180 SBS | -0.84 | -0.85 | -0.83 |
+| 11922 | 180 SBS | -0.67 | -0.66 | -0.66 |
+| 13642 | fisheye MKX200 | -0.55 | -0.53 | -0.53 |
+| 14341 | 180 SBS | -0.48 | -0.50 | |
+| 13382 | 180 SBS | -0.41 | -0.41 | |
+| 14464 | 180 SBS | -0.37 | -0.38 | |
+| 14686 | 180 SBS | -0.35 | -0.26 | |
+| 13531 | fisheye | -0.23 | -0.28 | |
+| 15060 | 180 SBS | +0.04 | +0.03 | -0.03 |
+| 16355 | 180 SBS | +0.01 | +0.02 | +0.01 |
+| 16399 | 180 SBS | -0.00 | +0.00 | |
+| 13508 | fisheye | +0.04 | +0.03 | |
+| 16336 | fisheye | -0.06 | -0.06 | |
+
+12851 and 14106 are the two scenes checked in the headset. Of the 213
+scenes, 65 of 75 known in the survey were below 0.25 degrees, 10 above and 4
+above 0.5; the misaligned ones cluster by studio (BaDoinkVR) but are handled
+per scene. The nearness rule sets 3 of the survey's known scenes to unknown
+(their frames agree on a near-to-far growth of 2.2 to 2.5 px); across all
+frames that growth is 0.7 px median and 1.8 px at the 90th percentile.
+Decoding more frames of some scenes showed why the frames are spread: one
+scene sits at +2 px for its first 60 %, at 0 around 65 % and at -2 px at
+80 %; its four frames now disagree and it stays unknown.
+
+The unit tests check the measure on synthetic stereo pairs: shifts of +-0.5,
+1 and 2 px come back within 0.1 px (side by side, top/bottom, fisheye), a
+relative roll of 0.5 degrees is recognised as such, a near object with the
+natural vertical parallax of the projection is not read as an offset (its raw
+shifts average 1 px), cameras at different heights are recognised, and
+disagreeing frames stay unknown.
+
+**Cost.** About 0.4 s of arithmetic per frame (run in the worker processes)
+and two extra keyframe decodes per stereo scene when it is measured with the
+projection. On an 8K library on a network share with 4 workers: the whole
+measurement took 2.4 s per scene with the alignment and 1.0 s without; the
+alignment task alone about 2 s per scene.
+
 ## Limitations
 
 * Only two frames are measured. A scene that changes format halfway (a
@@ -552,12 +692,18 @@ which the 0.12 limit now spares.
 * The corner-matte test knows one packing: red silhouettes in the corners of
   fisheye stereo. Mattes packed elsewhere are not tagged `Alpha`.
 * Measuring costs one `ffprobe` call and two decoded frames per scene (a few seconds for 8K HEVC on a
-  network share) plus, for a fisheye whose lens is still open, up to eight
+  network share), two more for a stereo scene's alignment, plus, for a fisheye whose lens is still open, up to eight
   small crops for the watermark. The detail measure adds about 0.7 s of
   arithmetic per tier scene and one temporary 1 MB file per frame in `/tmp`.
 * The detail measure sees two 1024 x 1024 crops of the eye centre. An upscale
   with synthesised detail (AI upscalers that invent texture, heavy sharpening)
   can pass as detailed.
+* The stereo alignment is one number per scene from four keyframes. A scene
+  whose offset changes part way (a camera re-rigged between takes) is left
+  unknown when the frames show it, but can be missed when all four happen to
+  fall in one part. 360 pairs are not measured. The degrees of a fisheye
+  depend on its lens tag (190 degrees without one), and the disc is assumed
+  to fill the eye's smaller side.
 
 ## Development
 

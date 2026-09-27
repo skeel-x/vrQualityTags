@@ -597,17 +597,28 @@ scene; when exactly one frame is missing for a count of three, 30 % and then
 70 % stand in. The offset is known when
 
 * at least 3 frames count,
-* their `c0` lie within 1 px of each other (0.18 degrees at 180 degrees
-  per 1024 px),
+* the frames do not change direction: when some point up and some down and
+  one of them is at least 0.25 degrees, the scene changes its offset part
+  way (a re-rigged camera) and no single correction suits all of it,
 * the offset does not grow with nearness: a second fit with a term `k * dx`
   gives how much more the nearest tiles are shifted than the farthest; the
   median of that over the frames must stay within 2 px. Cameras mounted at
   different heights show this way, and then no single tilt suits both the
   subject and the room,
-* and the mean is at most 2 degrees (more is a layout or projection error).
+* and the value is at most 2 degrees (more is a layout or projection error).
 
-Then the mean of the frames, in degrees, is stored, including `0.00` for a
-well aligned scene. Otherwise the scene is unknown.
+The value stored, in degrees, is the mean of the frames when they lie within
+1 px of each other (0.18 degrees at 180 degrees per 1024 px) or are all below
+0.25 degrees (an aligned scene, including `0.00`). Frames that all point the
+same way but by different amounts store the one closest to zero: the offset
+the whole scene has at least, so the correction is never too large for any
+part of it. Otherwise the scene is unknown.
+
+An earlier rule required all frames within 1 px. On 150 scenes it left
+unknown, 89 had frames that were more than 1 px apart; of those 30 were
+below 0.25 degrees in every frame (aligned), 36 pointed the same way (8 of
+them at least 0.25 degrees in every frame, for example -0.63/-0.70/-0.69/-0.46)
+and 23 changed direction. The rule above keeps only the last group unknown.
 
 **Stored.** Known: `vr_vertical_offset` is set. Unknown, or the scene is not
 a stereo 180 or fisheye pair (mono, flat, 360): the field is removed. Nothing
@@ -652,14 +663,14 @@ per scene. The nearness rule sets 3 of the survey's known scenes to unknown
 frames that growth is 0.7 px median and 1.8 px at the 90th percentile.
 Decoding more frames of some scenes showed why the frames are spread: one
 scene sits at +2 px for its first 60 %, at 0 around 65 % and at -2 px at
-80 %; its four frames now disagree and it stays unknown.
+80 %; its frames change direction and it stays unknown.
 
 The unit tests check the measure on synthetic stereo pairs: shifts of +-0.5,
 1 and 2 px come back within 0.1 px (side by side, top/bottom, fisheye), a
 relative roll of 0.5 degrees is recognised as such, a near object with the
 natural vertical parallax of the projection is not read as an offset (its raw
 shifts average 1 px), cameras at different heights are recognised, and
-disagreeing frames stay unknown.
+frames that change direction stay unknown.
 
 **Cost.** About 0.4 s of arithmetic per frame (run in the worker processes)
 and two extra keyframe decodes per stereo scene when it is measured with the

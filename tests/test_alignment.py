@@ -140,15 +140,36 @@ class Verdict(unittest.TestCase):
         self.assertEqual(v.voffset_verdict([fit(1.0), fit(1.1), fit(1.0, tiles=15)],
                                            self.DPP)[0], 0.18)
 
-    def test_disagreeing_frames(self):
+    def test_frames_that_change_direction(self):
+        # up in some frames, down in others, one of them noticeably: unknown
         deg, why = v.voffset_verdict([fit(2.05), fit(1.86), fit(-2.19)], self.DPP)
         self.assertIsNone(deg)
-        self.assertIn("disagree", why)
-        # 1 px apart is still agreement, more is not
-        self.assertIsNotNone(v.voffset_verdict([fit(1.0), fit(2.0), fit(1.5)], self.DPP)[0])
-        self.assertIsNone(v.voffset_verdict([fit(1.0), fit(2.05), fit(1.5)], self.DPP)[0])
-        # two disagreeing frames are enough to know
-        self.assertIn("disagree", v.voffset_verdict([fit(0.2), fit(1.5)], self.DPP)[1])
+        self.assertIn("disagree in direction", why)
+        # two such frames are enough to know
+        self.assertIn("disagree", v.voffset_verdict([fit(-2.2), fit(1.6)], self.DPP)[1])
+        self.assertTrue(v.voffset_conflict([-2.2, 1.6], self.DPP))
+        self.assertFalse(v.voffset_conflict([-0.5, 1.2], self.DPP))   # both below 0.25 deg
+        self.assertFalse(v.voffset_conflict([2.0, 3.5], self.DPP))
+
+    def test_agreeing_frames_give_the_mean(self):
+        # within 1 px: the mean, as before
+        self.assertEqual(v.voffset_verdict([fit(1.0), fit(2.0), fit(1.5)], self.DPP)[0], 0.26)
+
+    def test_one_way_by_different_amounts_gives_the_smallest(self):
+        # -0.63/-0.70/-0.69/-0.46 deg: all down, more than 1 px apart
+        px = [d / self.DPP for d in (-0.63, -0.70, -0.69, -0.46)]
+        deg, why = v.voffset_verdict([fit(x) for x in px], self.DPP)
+        self.assertEqual(deg, -0.46)
+        self.assertIn("smallest", why)
+        self.assertEqual(v.voffset_verdict([fit(1.0), fit(2.05), fit(1.5)], self.DPP)[0], 0.18)
+
+    def test_all_small_gives_the_mean_even_across_zero(self):
+        px = [d / self.DPP for d in (-0.23, -0.12, 0.18)]
+        deg, why = v.voffset_verdict([fit(x) for x in px], self.DPP)
+        self.assertEqual(deg, -0.06)
+        self.assertIn("mean", why)
+        # two frames only: still too few
+        self.assertIn("2 of 2 frames", v.voffset_verdict([fit(0.2), fit(1.5)], self.DPP)[1])
 
     def test_nearness_is_the_median_over_frames(self):
         # one frame with a large reading is noise; most frames with it is the rig

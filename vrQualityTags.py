@@ -89,7 +89,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "2.7.0"
+VERSION = "2.7.1"
 
 DEFAULTS = {
     "pathFilter": "/VR/",
@@ -1052,7 +1052,9 @@ VOFFSET_UNIQUE = 0.04       # and neither is one whose peak is not this much
 VOFFSET_MIN_TILES = 15      # matched tiles a frame needs
 VOFFSET_MAX_SE = 0.35       # standard error of c0 a frame may have, in px
 VOFFSET_MIN_FRAMES = 3      # frames with a valid fit a verdict needs
-VOFFSET_AGREE = 1.0         # and all of them within this many px
+VOFFSET_AGREE = 1.0         # frames within this many px give their mean
+VOFFSET_SMALL_DEG = 0.25    # below this in every frame the scene is aligned
+                            # (stash-vr corrects from here on): the mean too
 VOFFSET_MAX_DEG = 2.0       # larger is a layout or projection error, not a
                             # misaligned rig
 VOFFSET_NEAR_MAX = 2.0      # extra dy of the nearest tiles over the farthest
@@ -1065,7 +1067,7 @@ VOFFSET_FRACS = (0.4, 0.6, 0.2, 0.8, 0.3, 0.7)  # keyframes (fraction of the
                             # sample over the scene (some scenes change their
                             # offset part way, a re-rigged camera), the last
                             # two stand in for frames that did not count
-VOFFSET_PRIMARY = 4         # frames always decoded (unless they disagree)
+VOFFSET_PRIMARY = 4         # frames always decoded (unless they conflict)
 LENS_FOV = {RF52: 190.0, MKX200: 200.0, MKX220: 220.0, VRCA220: 220.0}
 FISHEYE_FOV = 190.0         # a fisheye without a lens tag
 
@@ -1459,28 +1461,44 @@ def frame_counts(fit):
         fit["se0"] <= VOFFSET_MAX_SE
 
 
+def voffset_conflict(px, dpp):
+    """Whether frame offsets px (pixels) can give no verdict whatever else is
+    decoded: some point up and some down while one of them is at least
+    VOFFSET_SMALL_DEG. Such a scene changes its offset part way, and no
+    single correction suits all of it."""
+    return any(v > 0 for v in px) and any(v < 0 for v in px) and \
+        any(abs(v) * dpp >= VOFFSET_SMALL_DEG for v in px)
+
+
 def voffset_verdict(fits, dpp, min_frames=VOFFSET_MIN_FRAMES):
     """(degrees or None, reason) from the fits of a scene's frames, dpp the
     degrees per pixel (deg_per_px()). Known only when at least min_frames
-    frames count (frame_counts()), their offsets lie within VOFFSET_AGREE px
-    of each other, the median of their "near" is at most VOFFSET_NEAR_MAX
-    and the mean offset at most VOFFSET_MAX_DEG. Rounded to hundredths of a
-    degree, same sign as the pixel offset."""
+    frames count (frame_counts()), they do not conflict (voffset_conflict()),
+    the median of their "near" is at most VOFFSET_NEAR_MAX and the value at
+    most VOFFSET_MAX_DEG. The value is the mean when the frames lie within
+    VOFFSET_AGREE px of each other or all below VOFFSET_SMALL_DEG, else (all
+    one way, by different amounts) the one closest to zero: the offset the
+    whole scene has at least, so the correction is never too large for any
+    part of it. Rounded to hundredths of a degree, same sign as the pixel
+    offset."""
     good = [f for f in fits if frame_counts(f)]
     px = [f["c0"] for f in good]
     desc = "/".join(f"{v:+.2f}" for v in px) or "none"
-    if px and max(px) - min(px) > VOFFSET_AGREE:
-        return None, f"frames disagree (c0 {desc} px)"
+    if voffset_conflict(px, dpp):
+        return None, f"frames disagree in direction (c0 {desc} px)"
     if len(good) < min_frames:
         return None, f"{len(good)} of {len(fits)} frames measurable (c0 {desc} px)"
     near = _median([f["near"] for f in good])
     if abs(near) > VOFFSET_NEAR_MAX:
         return None, (f"offset grows with nearness ({near:+.2f} px from far to near, c0 {desc} "
                       "px): the cameras sit at different heights")
-    deg = sum(px) / len(px) * dpp
+    if max(px) - min(px) <= VOFFSET_AGREE or all(abs(v) * dpp < VOFFSET_SMALL_DEG for v in px):
+        deg, how = sum(px) / len(px) * dpp, "mean"
+    else:
+        deg, how = min(px, key=abs) * dpp, "smallest"
     if abs(deg) > VOFFSET_MAX_DEG:
         return None, f"{deg:+.2f} deg is implausibly large (c0 {desc} px)"
-    return round(deg, 2) + 0.0, f"{deg:+.2f} deg (c0 {desc} px, {len(good)} frames)"
+    return round(deg, 2) + 0.0, f"{deg:+.2f} deg (c0 {desc} px, {len(good)} frames, {how})"
 
 
 def alignment_input(names):
@@ -1504,7 +1522,7 @@ def measure_alignment(cfg, f, names, cached=None):
     The frames are keyframes at VOFFSET_FRACS of the duration: the first
     VOFFSET_PRIMARY always, the others one at a time only while the count of
     frames that count is one short of VOFFSET_MIN_FRAMES; decoding stops as
-    soon as two counting frames disagree. cached: probe()'s stereo dict,
+    soon as the counting frames conflict (voffset_conflict()). cached: probe()'s stereo dict,
     whose frames are used when their size fits the layout.
     """
     if UNRESOLVED in names:
@@ -1516,13 +1534,15 @@ def measure_alignment(cfg, f, names, cached=None):
     if not w or not h or not path or not os.path.exists(path):
         return {}
     size = voffset_size(w, h, stereo)
+    ew, eh = (size[0] // 2, size[1]) if stereo == SBS else (size[0], size[1] // 2)
+    dpp = deg_per_px(eye_projection(screen, lens, ew, eh))
     have = (cached or {}).get("frames") or {}
     if (cached or {}).get("size") != size:
         have = {}
     fits, decoded = [], 0
     for i, frac in enumerate(VOFFSET_FRACS):
         good = [x["c0"] for x in fits if frame_counts(x)]
-        if good and max(good) - min(good) > VOFFSET_AGREE:
+        if voffset_conflict(good, dpp):
             break
         if i >= VOFFSET_PRIMARY and len(good) != VOFFSET_MIN_FRAMES - 1:
             break               # a stand-in only for a count one frame short
@@ -1534,8 +1554,7 @@ def measure_alignment(cfg, f, names, cached=None):
         fits.append(crunch(frame_voffset, buf, size[0], size[1], stereo, rl, screen, lens))
     if not decoded:
         return {}
-    ew, eh = (size[0] // 2, size[1]) if stereo == SBS else (size[0], size[1] // 2)
-    deg, why = voffset_verdict(fits, deg_per_px(eye_projection(screen, lens, ew, eh)))
+    deg, why = voffset_verdict(fits, dpp)
     return {"deg": deg, "why": why}
 
 
